@@ -1,0 +1,8 @@
+build/
+__pycache__/
+*.pyc
+*.ncu-rep
+*.nsys-rep
+*.o
+matmul/matmul
+matmul/test

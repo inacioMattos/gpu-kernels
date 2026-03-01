@@ -1,0 +1,4 @@
+BasedOnStyle: Google    # or LLVM, Mozilla, WebKit, Chromium, Microsoft
+ColumnLimit: 200
+IndentWidth: 2
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
