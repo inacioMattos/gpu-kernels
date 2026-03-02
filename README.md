@@ -2,6 +2,12 @@
 
 Working through CUDA and PMPP. Small experiments and notes.
 
-Starting with matrix multiplication in `matmul/`.
+Experiments: matmul, vector_add.
 
-Build with nvcc and link cuBLAS (`-lcublas`).
+```sh
+make
+make check
+make matmul
+```
+
+Set ARCH for your GPU. Still working on the matmul versions.
