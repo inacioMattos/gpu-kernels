@@ -30,17 +30,19 @@ enum MatmulAlgorithm {
   Tiled,
 };
 
-#define TILE_WIDTH 16
-#define THREAD_TILE_HEIGHT 4
-
+#define TM 8
+#define BK 8
 __global__ void sgemm_4_register_tiling(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
-  const uint col = threadIdx.x + (blockIdx.x * blockDim.x);
-  const uint row = threadIdx.y + (blockIdx.y * blockDim.y);
+  const uint BM = TM * BK;
+  const uint BN = BM;
 
-  __shared__ float As[TILE_WIDTH][TILE_WIDTH];
-  __shared__ float Bs[TILE_WIDTH][TILE_WIDTH];
+  const uint cCol = (blockIdx.x * BN) + (threadIdx.x % BN);
+  const uint cRow = (blockIdx.y * BM) + (threadIdx.x / TM);
 
-  float product = 0.0;
+  __shared__ float As[BM][BK];
+  __shared__ float Bs[BK][BN];
+
+  float product[TM] = {0.0};
 
   for (uint tile = 0; tile < ceil((float)K / TILE_WIDTH); tile++) {
     const uint Acol = threadIdx.x + tile * TILE_WIDTH;
@@ -68,6 +70,7 @@ __global__ void sgemm_4_register_tiling(int M, int N, int K, float alpha, float 
   else C[Cidx] = alpha * product + beta * C[Cidx];
 }
 
+#define TILE_WIDTH 16
 __global__ void sgemm_tiled(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
   const uint col = threadIdx.x + (blockIdx.x * blockDim.x);
   const uint row = threadIdx.y + (blockIdx.y * blockDim.y);
