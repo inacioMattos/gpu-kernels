@@ -37,28 +37,40 @@ __global__ void sgemm_4_register_tiling(int M, int N, int K, float alpha, float 
   const uint BN = BM;
 
   const uint cCol = (blockIdx.x * BN) + (threadIdx.x % BN);
-  const uint cRow = (blockIdx.y * BM) + (threadIdx.x / TM);
+  const uint cRow = (blockIdx.y * BM) + ((threadIdx.x / BN) * TM);
 
   __shared__ float As[BM][BK];
   __shared__ float Bs[BK][BN];
 
   float product[TM] = {0.0};
 
-  for (uint tile = 0; tile < ceil((float)K / TILE_WIDTH); tile++) {
-    const uint Acol = threadIdx.x + tile * TILE_WIDTH;
+  // The A row and B col this thread will be loading from GMEM into SREM
+  // It's the same value throughout this thread lifecycle
+  const uint Arow = (blockIdx.y * BM) + (threadIdx.x / BK);
+  const uint Bcol = (blockIdx.x * BN) + threadIdx.x % BN;
 
-    if (Acol < K && row < M) As[threadIdx.y][threadIdx.x] = A[Acol + row * K];
-    else As[threadIdx.y][threadIdx.x] = 0.0;
+  for (uint tile = 0; tile < ceil((float)K / BK); tile++) {
+    // DEFINE INDICES FOR EACH STEP
 
-    const uint Brow = threadIdx.y + tile * TILE_WIDTH;
+    // will change
+    const uint Acol = (threadIdx.x % BK) + tile * BK;
 
-    if (Brow < K && col < N) Bs[threadIdx.y][threadIdx.x] = B[col + Brow * N];
-    else Bs[threadIdx.y][threadIdx.x] = 0.0;
+    if (Acol < K && Arow < M) As[threadIdx.x / BK][threadIdx.x % BK] = A[Acol + Arow * K];
+    else As[threadIdx.x / BK][threadIdx.x % BK] = 0.0;
+
+    // will change
+    const uint Brow = (threadIdx.x / BN) + tile * BK;
+
+    if (Brow < K && Bcol < N) Bs[threadIdx.x % BK][Bcol] = B[Bcol + Brow * N];
+    else Bs[threadIdx.x % BK][Bcol] = 0.0;
 
     __syncthreads();
 
-    for (uint t = 0; t < TILE_WIDTH; t++) {
-      product += As[threadIdx.y][t] * Bs[t][threadIdx.x];
+    for (uint k = 0; k < BK; k++) {
+      float Btmp = Bs[k][cCol];
+      for (uint tm = 0; tm < TM; tm++) {
+        product[tm] += As[cRow][k] * Btmp;
+      }
     }
     __syncthreads();
   }
