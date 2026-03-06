@@ -28,16 +28,16 @@ enum MatmulAlgorithm {
   Cublas,
   Naive,
   Tiled,
+  TiledWith1DRegisterTiling,
 };
 
 #define TM 8
 #define BK 8
+#define BM (TM * BK)
+#define BN (TM * BK)
 __global__ void sgemm_4_register_tiling(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
-  const uint BM = TM * BK;
-  const uint BN = BM;
-
-  const uint cCol = (blockIdx.x * BN) + (threadIdx.x % BN);
-  const uint cRow = (blockIdx.y * BM) + ((threadIdx.x / BN) * TM);
+  const uint Ccol = (blockIdx.x * BN) + (threadIdx.x % BN);
+  const uint Crow = (blockIdx.y * BM) + ((threadIdx.x / BN) * TM);
 
   __shared__ float As[BM][BK];
   __shared__ float Bs[BK][BN];
@@ -49,37 +49,49 @@ __global__ void sgemm_4_register_tiling(int M, int N, int K, float alpha, float 
   const uint Arow = (blockIdx.y * BM) + (threadIdx.x / BK);
   const uint Bcol = (blockIdx.x * BN) + threadIdx.x % BN;
 
-  for (uint tile = 0; tile < ceil((float)K / BK); tile++) {
-    // DEFINE INDICES FOR EACH STEP
+  const uint toAsRow = threadIdx.x / BK;
+  const uint toAsCol = threadIdx.x % BK;
 
-    // will change
+  const uint toBsRow = threadIdx.x / BN;
+  const uint toBsCol = threadIdx.x % BN;
+
+  for (uint tile = 0; tile < ceil((float)K / BK); tile++) {
     const uint Acol = (threadIdx.x % BK) + tile * BK;
 
-    if (Acol < K && Arow < M) As[threadIdx.x / BK][threadIdx.x % BK] = A[Acol + Arow * K];
-    else As[threadIdx.x / BK][threadIdx.x % BK] = 0.0;
+    if (Acol < K && Arow < M) As[toAsRow][toAsCol] = A[Acol + Arow * K];
+    else As[toAsRow][toAsCol] = 0.0;
 
-    // will change
     const uint Brow = (threadIdx.x / BN) + tile * BK;
 
-    if (Brow < K && Bcol < N) Bs[threadIdx.x % BK][Bcol] = B[Bcol + Brow * N];
-    else Bs[threadIdx.x % BK][Bcol] = 0.0;
+    if (Brow < K && Bcol < N) Bs[toBsRow][toBsCol] = B[Bcol + Brow * N];
+    else Bs[toBsRow][toBsCol] = 0.0;
 
     __syncthreads();
-
     for (uint k = 0; k < BK; k++) {
-      float Btmp = Bs[k][cCol];
+      const uint fromAsRow = (threadIdx.x / BN) * TM;
+      const uint fromAsCol = k;
+
+      const uint fromBsRow = k;
+      const uint fromBsCol = (threadIdx.x % BN);
+
+      float Btmp = Bs[fromBsRow][fromBsCol];
       for (uint tm = 0; tm < TM; tm++) {
-        product[tm] += As[cRow][k] * Btmp;
+        product[tm] += As[fromAsRow + tm][fromAsCol] * Btmp;
       }
     }
     __syncthreads();
   }
 
-  if (col >= N || row >= M) return;
+  for (uint tm = 0; tm < TM; tm++) {
+    const uint col = Ccol;
+    const uint row = Crow + tm;
 
-  const uint Cidx = col + row * N;
-  if (beta == 0) C[Cidx] = alpha * product;
-  else C[Cidx] = alpha * product + beta * C[Cidx];
+    if (col >= N || row >= M) continue;
+
+    const uint Cidx = col + row * N;
+    if (beta == 0) C[Cidx] = alpha * product[tm];
+    else C[Cidx] = alpha * product[tm] + beta * C[Cidx];
+  }
 }
 
 #define TILE_WIDTH 16
@@ -209,6 +221,25 @@ void matmul(float* C_h, float* A_h, int A_m, int A_n, float* B_h, int B_m, int B
     }
   }
 
+  else if (algo == TiledWith1DRegisterTiling) {
+    dim3 blockDim((BM * BN) / TM);  // 512 threads, 1D
+    dim3 gridDim(ceil((float)B_n / BN), ceil((float)A_m / BM));
+
+    // Warm-up
+    sgemm_4_register_tiling<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+
+    cudaDeviceSynchronize();
+    WALL_START(tiled_1d_register_tiling);
+    sgemm_4_register_tiling<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+    cudaDeviceSynchronize();
+    WALL_END(tiled_1d_register_tiling);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      std::cout << "Kernel crashed :[" << std::endl << cudaGetErrorString(err) << std::endl;
+    }
+  }
+
   cudaMemcpy(C_h, C_d, sizeof(float) * A_m * B_n, cudaMemcpyDeviceToHost);
 
   cudaFree(A_d);
@@ -272,6 +303,11 @@ int main() {
   matmul(E, A, A_m, A_n, B, A_n, B_n, Tiled, handle);
 
   compareResults(C, E, A_m * B_n, "cublas v tiled");
+
+  float* F = new float[A_m * B_n];
+  matmul(F, A, A_m, A_n, B, A_n, B_n, TiledWith1DRegisterTiling, handle);
+
+  compareResults(C, F, A_m * B_n, "cublas v tiled with 1D register tiling");
 
   return 0;
 }
