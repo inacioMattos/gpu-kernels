@@ -31,10 +31,86 @@ enum MatmulAlgorithm {
   TiledWith1DRegisterTiling,
 };
 
+#define TM 2
+#define BK 2
+#define BM 4
+#define BN 4
+__global__ void sgemm_4_register_2dtiling(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
+  const uint Ccol = (blockIdx.x * BN) + (threadIdx.x % BN);
+  const uint Crow = (blockIdx.y * BM) + ((threadIdx.x / BN) * TM);
+
+  __shared__ float As[BM][BK];
+  __shared__ float Bs[BK][BN];
+
+  float product[TM][TM] = {0.0};
+
+  const uint subtitleAHeight = blockDim.x / BK;
+  const uint subtitleAWidth = BK;
+
+  const uint subtitleBHeight = BK;
+  const uint subtitleBWidth = blockDim.x / BK;
+
+  const uint subtitleARow = threadIdx.x / subtitleAWidth;
+  const uint subtitleACol = threadIdx.x % subtitleAWidth;
+
+  const uint subtitleBRow = threadIdx.x / subtitleBWidth;
+  const uint subtitleBCol = threadIdx.x % subtitleBWidth;
+
+  // The A row and B col this thread will be loading from GMEM into SREM
+  // It's the same value throughout this thread lifecycle
+  const uint Arow = (blockIdx.y * BM) + (threadIdx.x / BK);
+  const uint Bcol = (blockIdx.x * BN) + threadIdx.x % BN;
+
+  const uint toAsRow = threadIdx.x / BK;
+  const uint toAsCol = threadIdx.x % BK;
+
+  const uint toBsRow = threadIdx.x / BN;
+  const uint toBsCol = threadIdx.x % BN;
+
+  for (uint tile = 0; tile < ceil((float)K / BK); tile++) {
+    const uint Acol = (threadIdx.x % BK) + tile * BK;
+
+    if (Acol < K && Arow < M) As[toAsRow][toAsCol] = A[Acol + Arow * K];
+    else As[toAsRow][toAsCol] = 0.0;
+
+    const uint Brow = (threadIdx.x / BN) + tile * BK;
+
+    if (Brow < K && Bcol < N) Bs[toBsRow][toBsCol] = B[Bcol + Brow * N];
+    else Bs[toBsRow][toBsCol] = 0.0;
+
+    __syncthreads();
+    for (uint k = 0; k < BK; k++) {
+      const uint fromAsRow = (threadIdx.x / BN) * TM;
+      const uint fromAsCol = k;
+
+      const uint fromBsRow = k;
+      const uint fromBsCol = (threadIdx.x % BN);
+
+      float Btmp = Bs[fromBsRow][fromBsCol];
+      for (uint tm = 0; tm < TM; tm++) {
+        product[tm] += As[fromAsRow + tm][fromAsCol] * Btmp;
+      }
+    }
+    __syncthreads();
+  }
+
+  for (uint tm = 0; tm < TM; tm++) {
+    const uint col = Ccol;
+    const uint row = Crow + tm;
+
+    if (col >= N || row >= M) continue;
+
+    const uint Cidx = col + row * N;
+    if (beta == 0) C[Cidx] = alpha * product[tm];
+    else C[Cidx] = alpha * product[tm] + beta * C[Cidx];
+  }
+}
+
 #define TM 8
 #define BK 8
 #define BM (TM * BK)
 #define BN (TM * BK)
+// 2141198334 fp32 loads
 __global__ void sgemm_4_register_tiling(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
   const uint Ccol = (blockIdx.x * BN) + (threadIdx.x % BN);
   const uint Crow = (blockIdx.y * BM) + ((threadIdx.x / BN) * TM);
@@ -95,6 +171,7 @@ __global__ void sgemm_4_register_tiling(int M, int N, int K, float alpha, float 
 }
 
 #define TILE_WIDTH 16
+// 8564793336 fp32 loads
 __global__ void sgemm_tiled(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
   const uint col = threadIdx.x + (blockIdx.x * blockDim.x);
   const uint row = threadIdx.y + (blockIdx.y * blockDim.y);
