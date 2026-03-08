@@ -1,7 +1,7 @@
 NVCC ?= nvcc
 ARCH ?= sm_120
 NVCCFLAGS ?= -O3 -std=c++17
-KERNELS := vector_add
+KERNELS := vector_add reduction
 BINARIES := $(addprefix build/,$(KERNELS))
 
 .PHONY: all check matmul
