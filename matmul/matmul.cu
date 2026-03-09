@@ -29,15 +29,18 @@ enum MatmulAlgorithm {
   Naive,
   Tiled,
   TiledWith1DRegisterTiling,
+  TiledWith2DRegisterTiling,
 };
 
 #define TM 2
 #define BK 2
 #define BM 4
 #define BN 4
-__global__ void sgemm_4_register_2dtiling(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
-  const uint Ccol = (blockIdx.x * BN) + (threadIdx.x % BN);
-  const uint Crow = (blockIdx.y * BM) + ((threadIdx.x / BN) * TM);
+__global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
+  // total thread count needs to be divisible by BK
+  if (blockDim.x % BK != 0) {
+    return;
+  }
 
   __shared__ float As[BM][BK];
   __shared__ float Bs[BK][BN];
@@ -50,59 +53,109 @@ __global__ void sgemm_4_register_2dtiling(int M, int N, int K, float alpha, floa
   const uint subtitleBHeight = BK;
   const uint subtitleBWidth = blockDim.x / BK;
 
+  // idx = 1, row = 0, col = 1
   const uint subtitleARow = threadIdx.x / subtitleAWidth;
   const uint subtitleACol = threadIdx.x % subtitleAWidth;
 
+  // width = 2
+  // idx = 0, row = 0, col = 0
+  // idx = 1, row = 0, col = 1 <--- CHOSEN
+  // idx = 2, row = 1, col = 0
+  // idx = 3, row = 1, col = 1
+  // idx = 4, row = 2, col = 0
   const uint subtitleBRow = threadIdx.x / subtitleBWidth;
   const uint subtitleBCol = threadIdx.x % subtitleBWidth;
 
-  // The A row and B col this thread will be loading from GMEM into SREM
-  // It's the same value throughout this thread lifecycle
-  const uint Arow = (blockIdx.y * BM) + (threadIdx.x / BK);
-  const uint Bcol = (blockIdx.x * BN) + threadIdx.x % BN;
+  const uint blockRowOffset = blockIdx.y * BM;
+  const uint blockColOffset = blockIdx.x * BN;
 
-  const uint toAsRow = threadIdx.x / BK;
-  const uint toAsCol = threadIdx.x % BK;
+  const uint computeRowInTile = TM * ((threadIdx.x * TM) / BN);
+  const uint computeColInTile = (threadIdx.x * TM) % BN;
 
-  const uint toBsRow = threadIdx.x / BN;
-  const uint toBsCol = threadIdx.x % BN;
+  const uint CrowOffset = blockRowOffset + computeRowInTile;
+  const uint CcolOffset = blockColOffset + computeColInTile;
 
   for (uint tile = 0; tile < ceil((float)K / BK); tile++) {
-    const uint Acol = (threadIdx.x % BK) + tile * BK;
+    // 0
+    const uint fromARowOffset = blockIdx.y * BM;
+    // 1 * 3 = 3
+    const uint fromAColOffset = tile * BK;
 
-    if (Acol < K && Arow < M) As[toAsRow][toAsCol] = A[Acol + Arow * K];
-    else As[toAsRow][toAsCol] = 0.0;
+    // likely wrong; needs to take into consideration the blockIdx
+    const uint fromBRowOffset = tile * BK;
+    const uint fromBColOffset = blockIdx.x * BN;
 
-    const uint Brow = (threadIdx.x / BN) + tile * BK;
+    for (uint subtitle = 0; subtitle < ceil((float)BN / subtitleAHeight); subtitle++) {
+      // 0 + 1 * 2 = 2
+      const uint toAsRow = subtitleARow + subtitle * subtitleAHeight;
+      // 1
+      const uint toAsCol = subtitleACol;
+      // 0 + 2 = 2
+      const uint fromARow = fromARowOffset + toAsRow;
+      // 3 + 1 = 4
+      const uint fromACol = fromAColOffset + toAsCol;
 
-    if (Brow < K && Bcol < N) Bs[toBsRow][toBsCol] = B[Bcol + Brow * N];
-    else Bs[toBsRow][toBsCol] = 0.0;
+      if (fromARow >= M || fromACol >= K) As[toAsRow][toAsCol] = 0.0;
+      else As[toAsRow][toAsCol] = A[fromACol + fromARow * K];
+    }
+
+    for (uint subtitle = 0; subtitle < ceil((float)BN / subtitleBWidth); subtitle++) {
+      // subtitle = 1
+      // toBsRow = 0
+      const uint toBsRow = subtitleBRow;
+
+      // toBsCol = 1 + 1 * 2 = 3
+      const uint toBsCol = subtitleBCol + subtitle * subtitleBWidth;
+
+      // fromBRow = 0 + 0 = 0
+      const uint fromBRow = fromBRowOffset + toBsRow;
+
+      // fromBCol =
+      const uint fromBCol = fromBColOffset + toBsCol;
+
+      if (fromBRow >= K || fromBCol >= N) Bs[toBsRow][toBsCol] = 0.0;
+      else Bs[toBsRow][toBsCol] = B[fromBCol + fromBRow * N];
+    }
 
     __syncthreads();
-    for (uint k = 0; k < BK; k++) {
-      const uint fromAsRow = (threadIdx.x / BN) * TM;
-      const uint fromAsCol = k;
 
-      const uint fromBsRow = k;
-      const uint fromBsCol = (threadIdx.x % BN);
-
-      float Btmp = Bs[fromBsRow][fromBsCol];
+    float Atmp[TM] = {0.0};
+    float Btmp[TM] = {0.0};
+    for (uint dotIdx = 0; dotIdx < BK; dotIdx++) {
       for (uint tm = 0; tm < TM; tm++) {
-        product[tm] += As[fromAsRow + tm][fromAsCol] * Btmp;
+        // depends on: TM, total threads, BN, threadIdx
+        const uint fromAsRow = TM * ((threadIdx.x * TM) / BN);
+        const uint fromAsCol = dotIdx;
+        Atmp[tm] = As[fromAsRow][fromAsCol];
+      }
+
+      for (uint tn = 0; tn < TM; tn++) {
+        const uint fromBsRow = dotIdx;
+        const uint fromBsCol = (threadIdx.x * TM) % BN;
+        Btmp[tn] = Bs[fromBsRow][fromBsCol];
+      }
+
+      for (uint tm = 0; tm < TM; tm++) {
+        for (uint tn = 0; tn < TM; tn++) {
+          product[tm][tn] += Atmp[tm] * Btmp[tn];
+        }
       }
     }
+
     __syncthreads();
   }
 
   for (uint tm = 0; tm < TM; tm++) {
-    const uint col = Ccol;
-    const uint row = Crow + tm;
+    for (uint tn = 0; tn < TM; tn++) {
+      const uint row = CrowOffset + tm;
+      const uint col = CcolOffset + tn;
 
-    if (col >= N || row >= M) continue;
+      if (col >= N || row >= M) continue;
 
-    const uint Cidx = col + row * N;
-    if (beta == 0) C[Cidx] = alpha * product[tm];
-    else C[Cidx] = alpha * product[tm] + beta * C[Cidx];
+      const uint Cidx = col + row * N;
+      if (beta == 0) C[Cidx] = alpha * product[tm][tn];
+      else C[Cidx] = alpha * product[tm][tn] + beta * C[Cidx];
+    }
   }
 }
 
@@ -317,6 +370,25 @@ void matmul(float* C_h, float* A_h, int A_m, int A_n, float* B_h, int B_m, int B
     }
   }
 
+  else if (algo == TiledWith2DRegisterTiling) {
+    dim3 blockDim((BM * BN) / (BK * BK));  // 512 threads, 1D
+    dim3 gridDim(ceil((float)B_n / BN), ceil((float)A_m / BM));
+
+    // Warm-up
+    sgemm_5_register_2dtiling<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+
+    cudaDeviceSynchronize();
+    WALL_START(tiled_2d_register_tiling);
+    sgemm_5_register_2dtiling<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+    cudaDeviceSynchronize();
+    WALL_END(tiled_2d_register_tiling);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      std::cout << "Kernel crashed :[" << std::endl << cudaGetErrorString(err) << std::endl;
+    }
+  }
+
   cudaMemcpy(C_h, C_d, sizeof(float) * A_m * B_n, cudaMemcpyDeviceToHost);
 
   cudaFree(A_d);
@@ -385,6 +457,11 @@ int main() {
   matmul(F, A, A_m, A_n, B, A_n, B_n, TiledWith1DRegisterTiling, handle);
 
   compareResults(C, F, A_m * B_n, "cublas v tiled with 1D register tiling");
+
+  float* G = new float[A_m * B_n];
+  matmul(G, A, A_m, A_n, B, A_n, B_n, TiledWith2DRegisterTiling, handle);
+
+  compareResults(C, G, A_m * B_n, "cublas v tiled with 2D register tiling");
 
   return 0;
 }
