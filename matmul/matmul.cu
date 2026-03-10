@@ -1,5 +1,8 @@
 #include <cublas_v2.h>
 
+#include <cmath>
+#include <cstdio>
+#include <iomanip>
 #include <iostream>
 
 #define WALL_START(name)         \
@@ -24,6 +27,31 @@ void randomFill(float* vec, int len) {
   }
 }
 
+void printMatrix(const float* mat, int rows, int cols, const char* name = nullptr) {
+  if (name) std::cout << name << " ";
+  std::cout << "(" << rows << "x" << cols << ")\n";
+
+  int colWidth = 6;
+  for (int r = 0; r < rows; r++) {
+    for (int c = 0; c < cols; c++) {
+      char buf[32];
+      int len = snprintf(buf, sizeof(buf), "%.6g", mat[c + r * cols]);
+      if (len > 0) colWidth = std::max(colWidth, len);
+    }
+  }
+  colWidth += 2;
+
+  for (int r = 0; r < rows; r++) {
+    std::cout << "  ";
+    for (int c = 0; c < cols; c++) {
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%.6g", mat[c + r * cols]);
+      std::cout << std::setw(colWidth) << buf;
+    }
+    std::cout << "\n";
+  }
+}
+
 enum MatmulAlgorithm {
   Cublas,
   Naive,
@@ -32,10 +60,10 @@ enum MatmulAlgorithm {
   TiledWith2DRegisterTiling,
 };
 
-#define TM 2
-#define BK 2
-#define BM 4
-#define BN 4
+#define TM 8
+#define BK 8
+#define BM 128
+#define BN 128
 __global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
   // total thread count needs to be divisible by BK
   if (blockDim.x % BK != 0) {
@@ -71,6 +99,14 @@ __global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, floa
 
   const uint computeRowInTile = TM * ((threadIdx.x * TM) / BN);
   const uint computeColInTile = (threadIdx.x * TM) % BN;
+
+  /*
+        const uint threadCol = threadIdx.x % (BN / TM);   // 0..15 with stride 1
+        const uint threadRow = threadIdx.x / (BN / TM);   // 0..15
+
+        const uint computeRowInTile = threadRow * TM;
+        const uint computeColInTile = threadCol * TM;
+  */
 
   const uint CrowOffset = blockRowOffset + computeRowInTile;
   const uint CcolOffset = blockColOffset + computeColInTile;
@@ -124,14 +160,16 @@ __global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, floa
     for (uint dotIdx = 0; dotIdx < BK; dotIdx++) {
       for (uint tm = 0; tm < TM; tm++) {
         // depends on: TM, total threads, BN, threadIdx
-        const uint fromAsRow = TM * ((threadIdx.x * TM) / BN);
+        const uint fromAsRow = (TM * ((threadIdx.x * TM) / BN)) + tm;
+        // idx = 0, 8 * (0*8 / 8) + 0 = 0
+        // idx = 1, 8 * (1*8 / 8) + 0 = 8
         const uint fromAsCol = dotIdx;
         Atmp[tm] = As[fromAsRow][fromAsCol];
       }
 
       for (uint tn = 0; tn < TM; tn++) {
         const uint fromBsRow = dotIdx;
-        const uint fromBsCol = (threadIdx.x * TM) % BN;
+        const uint fromBsCol = ((threadIdx.x * TM) % BN) + tn;
         Btmp[tn] = Bs[fromBsRow][fromBsCol];
       }
 
@@ -159,10 +197,6 @@ __global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, floa
   }
 }
 
-#define TM 8
-#define BK 8
-#define BM (TM * BK)
-#define BN (TM * BK)
 // 2141198334 fp32 loads
 __global__ void sgemm_4_register_tiling(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
   const uint Ccol = (blockIdx.x * BN) + (threadIdx.x % BN);
@@ -371,7 +405,7 @@ void matmul(float* C_h, float* A_h, int A_m, int A_n, float* B_h, int B_m, int B
   }
 
   else if (algo == TiledWith2DRegisterTiling) {
-    dim3 blockDim((BM * BN) / (BK * BK));  // 512 threads, 1D
+    dim3 blockDim((BM * BN) / (BK * BK));
     dim3 gridDim(ceil((float)B_n / BN), ceil((float)A_m / BM));
 
     // Warm-up
@@ -427,9 +461,9 @@ void compareResults(float* ref, float* test, int len, const char* label, float r
 }
 
 int main() {
-  int A_m = 4092;
-  int A_n = 4092;
-  int B_n = 4092;
+  int A_m = 2048;
+  int A_n = 2048;
+  int B_n = 2048;
 
   float* A = new float[A_m * A_n];
   float* B = new float[A_n * B_n];
