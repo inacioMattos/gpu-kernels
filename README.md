@@ -2,7 +2,7 @@
 
 Working through CUDA and PMPP. Small experiments and notes.
 
-Experiments: matmul, vector_add, reduction.
+Experiments: matmul, vector_add, reduction, transpose.
 
 ```sh
 make
