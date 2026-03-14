@@ -66,6 +66,139 @@ enum MatmulAlgorithm {
 #define BN 128
 __global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
   // total thread count needs to be divisible by BK
+  if (blockDim.x % BK != 0) {
+    return;
+  }
+
+  __shared__ float As[BM][BK];
+  __shared__ float Bs[BK][BN];
+
+  float product[TM][TM] = {0.0};
+
+  const uint subtitleAHeight = blockDim.x / BK;
+  const uint subtitleAWidth = BK;
+
+  const uint subtitleBHeight = BK;
+  const uint subtitleBWidth = blockDim.x / BK;
+
+  // idx = 1, row = 0, col = 1
+  const uint subtitleARow = threadIdx.x / subtitleAWidth;
+  const uint subtitleACol = threadIdx.x % subtitleAWidth;
+
+  // width = 2
+  // idx = 0, row = 0, col = 0
+  // idx = 1, row = 0, col = 1 <--- CHOSEN
+  // idx = 2, row = 1, col = 0
+  // idx = 3, row = 1, col = 1
+  // idx = 4, row = 2, col = 0
+  const uint subtitleBRow = threadIdx.x / subtitleBWidth;
+  const uint subtitleBCol = threadIdx.x % subtitleBWidth;
+
+  const uint blockRowOffset = blockIdx.y * BM;
+  const uint blockColOffset = blockIdx.x * BN;
+
+  const uint computeRowInTile = TM * ((threadIdx.x * TM) / BN);
+  const uint computeColInTile = (threadIdx.x * TM) % BN;
+
+  /*
+        const uint threadCol = threadIdx.x % (BN / TM);   // 0..15 with stride 1
+        const uint threadRow = threadIdx.x / (BN / TM);   // 0..15
+
+        const uint computeRowInTile = threadRow * TM;
+        const uint computeColInTile = threadCol * TM;
+  */
+
+  const uint CrowOffset = blockRowOffset + computeRowInTile;
+  const uint CcolOffset = blockColOffset + computeColInTile;
+
+  for (uint tile = 0; tile < ceil((float)K / BK); tile++) {
+    // 0
+    const uint fromARowOffset = blockIdx.y * BM;
+    // 1 * 3 = 3
+    const uint fromAColOffset = tile * BK;
+
+    // likely wrong; needs to take into consideration the blockIdx
+    const uint fromBRowOffset = tile * BK;
+    const uint fromBColOffset = blockIdx.x * BN;
+
+    for (uint subtitle = 0; subtitle < ceil((float)BN / subtitleAHeight); subtitle++) {
+      // 0 + 1 * 2 = 2
+      const uint toAsRow = subtitleARow + subtitle * subtitleAHeight;
+      // 1
+      const uint toAsCol = subtitleACol;
+      // 0 + 2 = 2
+      const uint fromARow = fromARowOffset + toAsRow;
+      // 3 + 1 = 4
+      const uint fromACol = fromAColOffset + toAsCol;
+
+      if (fromARow >= M || fromACol >= K) As[toAsRow][toAsCol] = 0.0;
+      else As[toAsRow][toAsCol] = A[fromACol + fromARow * K];
+    }
+
+    for (uint subtitle = 0; subtitle < ceil((float)BN / subtitleBWidth); subtitle++) {
+      // subtitle = 1
+      // toBsRow = 0
+      const uint toBsRow = subtitleBRow;
+
+      // toBsCol = 1 + 1 * 2 = 3
+      const uint toBsCol = subtitleBCol + subtitle * subtitleBWidth;
+
+      // fromBRow = 0 + 0 = 0
+      const uint fromBRow = fromBRowOffset + toBsRow;
+
+      // fromBCol =
+      const uint fromBCol = fromBColOffset + toBsCol;
+
+      if (fromBRow >= K || fromBCol >= N) Bs[toBsRow][toBsCol] = 0.0;
+      else Bs[toBsRow][toBsCol] = B[fromBCol + fromBRow * N];
+    }
+
+    __syncthreads();
+
+    float Atmp[TM] = {0.0};
+    float Btmp[TM] = {0.0};
+    for (uint dotIdx = 0; dotIdx < BK; dotIdx++) {
+      for (uint tm = 0; tm < TM; tm++) {
+        // depends on: TM, total threads, BN, threadIdx
+        const uint fromAsRow = (TM * ((threadIdx.x * TM) / BN)) + tm;
+        // idx = 0, 8 * (0*8 / 8) + 0 = 0
+        // idx = 1, 8 * (1*8 / 8) + 0 = 8
+        const uint fromAsCol = dotIdx;
+        Atmp[tm] = As[fromAsRow][fromAsCol];
+      }
+
+      for (uint tn = 0; tn < TM; tn++) {
+        const uint fromBsRow = dotIdx;
+        const uint fromBsCol = ((threadIdx.x * TM) % BN) + tn;
+        Btmp[tn] = Bs[fromBsRow][fromBsCol];
+      }
+
+      for (uint tm = 0; tm < TM; tm++) {
+        for (uint tn = 0; tn < TM; tn++) {
+          product[tm][tn] += Atmp[tm] * Btmp[tn];
+        }
+      }
+    }
+
+    __syncthreads();
+  }
+
+  for (uint tm = 0; tm < TM; tm++) {
+    for (uint tn = 0; tn < TM; tn++) {
+      const uint row = CrowOffset + tm;
+      const uint col = CcolOffset + tn;
+
+      if (col >= N || row >= M) continue;
+
+      const uint Cidx = col + row * N;
+      if (beta == 0) C[Cidx] = alpha * product[tm][tn];
+      else C[Cidx] = alpha * product[tm][tn] + beta * C[Cidx];
+    }
+  }
+}
+
+__global__ void sgemm_5_register_2dtiling_v2(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
+  // total thread count needs to be divisible by BK
   if (blockDim.x % BK != 0 || blockDim.x % BN != 0) {
     return;
   }
@@ -97,12 +230,6 @@ __global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, floa
 
   const uint CrowOffset = blockRowOffset + computeRowInTile;
   const uint CcolOffset = blockColOffset + computeColInTile;
-
-  const int threadCol = threadIdx.x % (BN / TM);
-  const int threadRow = threadIdx.x / (BN / TM);
-
-  float Atmp[TM] = {0.0};
-  float Btmp[TM] = {0.0};
 
   for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
     const uint fromARowOffset = blockIdx.y * BM;
@@ -137,24 +264,7 @@ __global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, floa
 
     __syncthreads();
 
-    // calculate per-thread results
-    for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
-      // block into registers
-      for (uint i = 0; i < TM; ++i) {
-        Atmp[i] = As[(threadRow * TM + i)][dotIdx];
-      }
-      for (uint i = 0; i < TM; ++i) {
-        Btmp[i] = Bs[dotIdx][threadCol * TM + i];
-      }
-      for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
-        for (uint resIdxN = 0; resIdxN < TM; ++resIdxN) {
-          product[resIdxM][resIdxN] += Atmp[resIdxM] * Btmp[resIdxN];
-        }
-      }
-    }
-
     // COMPUTE PHASE START
-    /*
     float Atmp[TM] = {0.0};
     float Btmp[TM] = {0.0};
     const int threadCol = threadIdx.x % (BN / TM);
@@ -163,7 +273,7 @@ __global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, floa
       for (uint tm = 0; tm < TM; tm++) {
         const uint fromAsRow = (TM * ((threadIdx.x * TM) / BN)) + tm;
         const uint fromAsCol = dotIdx;
-        Atmp[tm] = As[threadRow * TM + tm][dotIdx];
+        Atmp[tm] = As[fromAsRow][fromAsCol];
       }
 
       for (uint tn = 0; tn < TM; tn++) {
@@ -178,7 +288,6 @@ __global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, floa
         }
       }
     }
-    */
 
     __syncthreads();
   }
@@ -193,90 +302,6 @@ __global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, floa
       const uint Cidx = col + row * N;
       if (beta == 0) C[Cidx] = alpha * product[tm][tn];
       else C[Cidx] = alpha * product[tm][tn] + beta * C[Cidx];
-    }
-  }
-}
-
-__global__ void sgemm_5_register_2dtiling_v2(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
-  const int TN = 8;
-  const uint cRow = blockIdx.y;
-  const uint cCol = blockIdx.x;
-
-  const uint totalResultsBlocktile = BM * BN;
-  // A thread is responsible for calculating TM*TN elements in the blocktile
-  const uint numThreadsBlocktile = totalResultsBlocktile / (TM * TN);
-
-  // ResultsPerBlock / ResultsPerThread == ThreadsPerBlock
-
-  // BN/TN are the number of threads to span a column
-  const int threadCol = threadIdx.x % (BN / TN);
-  const int threadRow = threadIdx.x / (BN / TN);
-
-  // allocate space for the current blocktile in smem
-  __shared__ float As[BM * BK];
-  __shared__ float Bs[BK * BN];
-
-  // Move blocktile to beginning of A's row and B's column
-  A += cRow * BM * K;
-  B += cCol * BN;
-  C += cRow * BM * N + cCol * BN;
-
-  // calculating the indices that this thread will load into SMEM
-  const uint innerRowA = threadIdx.x / BK;
-  const uint innerColA = threadIdx.x % BK;
-  // calculates the number of rows of As that are being loaded in a single step
-  // by a single block
-  const uint strideA = numThreadsBlocktile / BK;
-  const uint innerRowB = threadIdx.x / BN;
-  const uint innerColB = threadIdx.x % BN;
-  // for both As and Bs we want each load to span the full column-width, for
-  // better GMEM coalescing (as opposed to spanning full row-width and iterating
-  // across columns)
-  const uint strideB = numThreadsBlocktile / BN;
-
-  // allocate thread-local cache for results in registerfile
-  float threadResults[TM * TN] = {0.0};
-  // register caches for As and Bs
-  float regM[TM] = {0.0};
-  float regN[TN] = {0.0};
-
-  // outer-most loop over block tiles
-  for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
-    // populate the SMEM caches
-    for (uint loadOffset = 0; loadOffset < BM; loadOffset += strideA) {
-      As[(innerRowA + loadOffset) * BK + innerColA] = A[(innerRowA + loadOffset) * K + innerColA];
-    }
-    for (uint loadOffset = 0; loadOffset < BK; loadOffset += strideB) {
-      Bs[(innerRowB + loadOffset) * BN + innerColB] = B[(innerRowB + loadOffset) * N + innerColB];
-    }
-    __syncthreads();
-
-    // advance blocktile
-    A += BK;      // move BK columns to right
-    B += BK * N;  // move BK rows down
-
-    // calculate per-thread results
-    for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
-      // block into registers
-      for (uint i = 0; i < TM; ++i) {
-        regM[i] = As[(threadRow * TM + i) * BK + dotIdx];
-      }
-      for (uint i = 0; i < TN; ++i) {
-        regN[i] = Bs[dotIdx * BN + threadCol * TN + i];
-      }
-      for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
-        for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
-          threadResults[resIdxM * TN + resIdxN] += regM[resIdxM] * regN[resIdxN];
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-  // write out the results
-  for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
-    for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
-      C[(threadRow * TM + resIdxM) * N + threadCol * TN + resIdxN] = alpha * threadResults[resIdxM * TN + resIdxN] + beta * C[(threadRow * TM + resIdxM) * N + threadCol * TN + resIdxN];
     }
   }
 }
@@ -497,11 +522,11 @@ void matmul(float* C_h, float* A_h, int A_m, int A_n, float* B_h, int B_m, int B
     dim3 gridDim(ceil((float)B_n / BN), ceil((float)A_m / BM));
 
     // Warm-up
-    sgemm_5_register_2dtiling<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+    sgemm_5_register_2dtiling_v2<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
 
     cudaDeviceSynchronize();
     WALL_START(tiled_2d_register_tiling);
-    sgemm_5_register_2dtiling<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+    sgemm_5_register_2dtiling_v2<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
     cudaDeviceSynchronize();
     WALL_END(tiled_2d_register_tiling);
 
@@ -549,9 +574,9 @@ void compareResults(float* ref, float* test, int len, const char* label, float r
 }
 
 int main() {
-  int A_m = 2048;
-  int A_n = 2048;
-  int B_n = 2048;
+  int A_m = 4096;
+  int A_n = 4096;
+  int B_n = 4096;
 
   float* A = new float[A_m * A_n];
   float* B = new float[A_n * B_n];
