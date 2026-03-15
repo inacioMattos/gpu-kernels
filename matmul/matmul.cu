@@ -58,12 +58,154 @@ enum MatmulAlgorithm {
   Tiled,
   TiledWith1DRegisterTiling,
   TiledWith2DRegisterTiling,
+  TiledWith2DRegisterTilingAsVectorized,
 };
 
 #define TM 8
 #define BK 8
 #define BM 128
 #define BN 128
+
+__global__ void sgemm_6_register_2dtiling_vectorized_As(int M, int N, int K, float alpha, float beta, float* A, float* B, float* C) {
+  // total thread count needs to be divisible by BK
+  if (blockDim.x % BK != 0 || blockDim.x % BN != 0 || BM % 4 != 0 || BN % 4 != 0) {
+    return;
+  }
+
+  __shared__ float As[BK][BM];
+  __shared__ float Bs[BK][BN];
+
+  float product[TM][TM] = {0.0};
+
+  const uint totalThreads = (BM * BN) / (TM * TM);
+
+  const uint subtitleAHeight = totalThreads / BK;
+  const uint subtitleAWidth = BK;
+
+  const uint subtitleBHeight = totalThreads / BN;  // rows loaded per pass
+  const uint subtitleBWidth = BN;                  // full row width
+
+  if ((BM / subtitleAHeight) % 4 != 0 || (BK / subtitleBHeight) % 4 != 0) {
+    return;
+  }
+
+  const uint subtitleARow = (threadIdx.x * 4) / subtitleAWidth;
+  const uint subtitleACol = (threadIdx.x * 4) % subtitleAWidth;
+
+  const uint subtitleBRow = (threadIdx.x * 4) / subtitleBWidth;
+  const uint subtitleBCol = (threadIdx.x * 4) % subtitleBWidth;
+
+  const uint blockRowOffset = blockIdx.y * BM;
+  const uint blockColOffset = blockIdx.x * BN;
+
+  const uint computeRowInTile = TM * ((threadIdx.x * TM) / BN);
+  const uint computeColInTile = (threadIdx.x * TM) % BN;
+
+  const uint CrowOffset = blockRowOffset + computeRowInTile;
+  const uint CcolOffset = blockColOffset + computeColInTile;
+
+  for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
+    const uint fromARowOffset = blockIdx.y * BM;
+    const uint fromAColOffset = bkIdx;
+
+    const uint fromBRowOffset = bkIdx;
+    const uint fromBColOffset = blockIdx.x * BN;
+
+    // LOADING PHASE: loading into As
+    for (uint loadOffset = 0; loadOffset < BM / 4; loadOffset += subtitleAHeight) {
+      const uint toAsRow = subtitleARow + loadOffset;
+      const uint toAsCol = subtitleACol;
+
+      const uint fromARow = fromARowOffset + toAsRow;
+      const uint fromACol = fromAColOffset + toAsCol;
+
+      if (fromARow >= M || fromACol >= K) {
+        As[toAsCol][toAsRow] = 0.0;
+        As[toAsCol + 1][toAsRow] = 0.0;
+        As[toAsCol + 2][toAsRow] = 0.0;
+        As[toAsCol + 3][toAsRow] = 0.0;
+      } else {
+        float4 tmp = reinterpret_cast<float4*>(&A[fromACol + fromARow * K])[0];
+        As[toAsCol + 0][toAsRow] = tmp.x;
+        As[toAsCol + 1][toAsRow] = tmp.y;
+        As[toAsCol + 2][toAsRow] = tmp.z;
+        As[toAsCol + 3][toAsRow] = tmp.w;
+      }
+    }
+
+    // LOADING PHASE: loading into Bs
+    for (uint loadOffset = 0; loadOffset < BK / 4; loadOffset += subtitleBHeight) {
+      const uint toBsRow = subtitleBRow + loadOffset;
+      const uint toBsCol = subtitleBCol;
+
+      const uint fromBRow = fromBRowOffset + toBsRow;
+      const uint fromBCol = fromBColOffset + toBsCol;
+
+      if (fromBRow >= K || fromBCol >= N) Bs[toBsRow][toBsCol] = 0.0;
+      else {
+        float4 tmp = reinterpret_cast<float4*>(&B[fromBCol + fromBRow * N])[0];
+        Bs[toBsRow][toBsCol + 0] = tmp.x;
+        Bs[toBsRow][toBsCol + 1] = tmp.y;
+        Bs[toBsRow][toBsCol + 2] = tmp.z;
+        Bs[toBsRow][toBsCol + 3] = tmp.w;
+      }
+    }
+
+    __syncthreads();
+
+    // COMPUTE PHASE START
+    float Atmp[TM] = {0.0};
+    float Btmp[TM] = {0.0};
+    for (uint dotIdx = 0; dotIdx < BK; dotIdx++) {
+      for (uint tm = 0; tm < TM; tm++) {
+        const uint fromAsRow = (TM * ((threadIdx.x * TM) / BN)) + tm;
+        const uint fromAsCol = dotIdx;
+        Atmp[tm] = As[fromAsCol][fromAsRow];
+      }
+
+      // BM = BN = 128
+      // TM = 8
+      // tn = 0
+      for (uint tn = 0; tn < TM; tn++) {
+        const uint fromBsRow = dotIdx;
+
+        // idx = 0 -> (0 * 8) % 128 + 0 = 0
+        // idx = 1 -> 8
+        // idx = 2 -> 16
+        // ...
+        // idx= 10 -> 80
+        // ...
+        // idx= 15 -> 120
+        // idx= 16 -> 0
+        // idx= 31 -> 120
+        const uint fromBsCol = ((threadIdx.x * TM) % BN) + tn;
+        Btmp[tn] = Bs[fromBsRow][fromBsCol];
+      }
+
+      for (uint tm = 0; tm < TM; tm++) {
+        for (uint tn = 0; tn < TM; tn++) {
+          product[tm][tn] += Atmp[tm] * Btmp[tn];
+        }
+      }
+    }
+
+    __syncthreads();
+  }
+
+  for (uint tm = 0; tm < TM; tm++) {
+    for (uint tn = 0; tn < TM; tn++) {
+      const uint row = CrowOffset + tm;
+      const uint col = CcolOffset + tn;
+
+      if (col >= N || row >= M) continue;
+
+      const uint Cidx = col + row * N;
+      if (beta == 0) C[Cidx] = alpha * product[tm][tn];
+      else C[Cidx] = alpha * product[tm][tn] + beta * C[Cidx];
+    }
+  }
+}
+
 __global__ void sgemm_5_register_2dtiling(int M, int N, int K, float alpha, float beta, const float* A, const float* B, float* C) {
   // total thread count needs to be divisible by BK
   if (blockDim.x % BK != 0) {
@@ -536,6 +678,25 @@ void matmul(float* C_h, float* A_h, int A_m, int A_n, float* B_h, int B_m, int B
     }
   }
 
+  else if (algo == TiledWith2DRegisterTilingAsVectorized) {
+    dim3 blockDim((BM * BN) / (BK * BK));
+    dim3 gridDim(ceil((float)B_n / BN), ceil((float)A_m / BM));
+
+    // Warm-up
+    sgemm_6_register_2dtiling_vectorized_As<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+
+    cudaDeviceSynchronize();
+    WALL_START(k6_vectorized_As_tiled_2d_register_tiling);
+    sgemm_6_register_2dtiling_vectorized_As<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+    cudaDeviceSynchronize();
+    WALL_END(k6_vectorized_As_tiled_2d_register_tiling);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      std::cout << "Kernel crashed :[" << std::endl << cudaGetErrorString(err) << std::endl;
+    }
+  }
+
   cudaMemcpy(C_h, C_d, sizeof(float) * A_m * B_n, cudaMemcpyDeviceToHost);
 
   cudaFree(A_d);
@@ -574,9 +735,9 @@ void compareResults(float* ref, float* test, int len, const char* label, float r
 }
 
 int main() {
-  int A_m = 4096;
-  int A_n = 4096;
-  int B_n = 4096;
+  int A_m = 2048;
+  int A_n = 2048;
+  int B_n = 2048;
 
   float* A = new float[A_m * A_n];
   float* B = new float[A_n * B_n];
@@ -609,6 +770,11 @@ int main() {
   matmul(G, A, A_m, A_n, B, A_n, B_n, TiledWith2DRegisterTiling, handle);
 
   compareResults(C, G, A_m * B_n, "cublas v tiled with 2D register tiling");
+
+  float* H = new float[A_m * B_n];
+  matmul(H, A, A_m, A_n, B, A_n, B_n, TiledWith2DRegisterTilingAsVectorized, handle);
+
+  compareResults(C, H, A_m * B_n, "cublas v K6 vectorized tiled with 2D register tiling");
 
   return 0;
 }
