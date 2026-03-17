@@ -64,6 +64,7 @@ enum MatmulAlgorithm {
   K9DoubleBuffer,
   K10VecSmem,
   K11DbVec,
+  K8bWarptiledK6Style,
 };
 
 #define TM 8
@@ -192,6 +193,153 @@ __global__ void sgemm_6_register_2dtiling_vectorized_As(int M, int N, int K, flo
       const uint Cidx = col + row * N;
       if (beta == 0) C[Cidx] = alpha * product[tm][tn];
       else C[Cidx] = alpha * product[tm][tn] + beta * C[Cidx];
+    }
+  }
+}
+
+// ============================================================================
+// k8b: "warptiling, k6-style". The goal: match k8's speed while reading like k6.
+// Compared to k6, only TWO things change, and both are localized:
+//
+//   (1) the thread->output MAPPING is warp-aware (kills the bank conflict), and
+//   (2) each thread owns WNITER column-groups instead of one (restores the
+//       register reuse that makes k8 fast).
+//
+// Everything else is k6: transposed As[k][m], Bs[k][n], a 2-D `product`, scalar
+// Atmp/Btmp reads, the dotIdx loop, the grid-stride loaders, and the store.
+//
+// WHY k6 is slow:  k6's map  computeCol = (threadIdx*TM) % BN  spaces a warp's 32
+// lanes TM apart in N, so their Bs reads hit only ~4 banks -> ~4-way conflict.
+// THE MAPPING FIX:  lay each warp's 32 lanes out as a WMX x WNX grid so adjacent
+// lanes own adjacent TN-wide columns (stride TN). With WNX*TN <= 32 the WNX
+// columns hit WNX distinct banks -> conflict-free; M-lanes broadcast.
+// WHY WNITER:  with one column-group per thread you reload As for too few FMAs.
+// Letting each thread sweep WNITER groups (WSUBN apart) reuses its TM A-registers
+// across WNITER*TN B-values -> same arithmetic intensity as k8. (This is k8 with
+// WMITER fixed at 1 — k8's own best config also uses WMITER=1, so we lose nothing.)
+//
+//   warp geometry:  WSUBN = WNX*TN ;  WM = WMX*TM ;  WN = WNITER*WSUBN
+// ============================================================================
+#ifndef K8B_BM
+#define K8B_BM 128
+#endif
+#ifndef K8B_BN
+#define K8B_BN 128
+#endif
+#ifndef K8B_BK
+#define K8B_BK 8
+#endif
+#ifndef K8B_TM
+#define K8B_TM 8
+#endif
+#ifndef K8B_TN
+#define K8B_TN 4
+#endif
+#ifndef K8B_WMX
+#define K8B_WMX 4  // lanes of a warp along M; WNX = 32/WMX along N. (WNX*TN should be <= 32.)
+#endif
+#ifndef K8B_WNITER
+#define K8B_WNITER 2  // column-groups each thread owns (the only extra loop vs k6)
+#endif
+#define K8B_WNX (32 / K8B_WMX)
+#define K8B_WSUBN (K8B_WNX * K8B_TN)        // N-width of one column-group
+#define K8B_WM (K8B_WMX * K8B_TM)           // warp tile height
+#define K8B_WN (K8B_WNITER * K8B_WSUBN)     // warp tile width
+__global__ void sgemm_8b_warptiled_k6style(int M, int N, int K, float alpha, float beta, float* A, float* B, float* C) {
+  if (K8B_BK % 4 != 0 || K8B_BN % 4 != 0 || K8B_BM % K8B_WM != 0 || K8B_BN % K8B_WN != 0) return;
+
+  __shared__ float As[K8B_BK][K8B_BM];  // transposed As[k][m] — identical to k6
+  __shared__ float Bs[K8B_BK][K8B_BN];
+
+  float product[K8B_TM][K8B_WNITER * K8B_TN] = {0.0};  // k6 was [TM][TM]; now TM x (WNITER*TN)
+
+  const uint totalThreads = (K8B_BM * K8B_BN) / (K8B_TM * K8B_TN * K8B_WNITER);
+
+  const uint blockRowOffset = blockIdx.y * K8B_BM;
+  const uint blockColOffset = blockIdx.x * K8B_BN;
+
+  // ---- CHANGE (1): warp-aware thread->output mapping (vs k6's stride-TM map) ----
+  const uint warpIdx = threadIdx.x / 32;
+  const uint laneIdx = threadIdx.x % 32;
+  // warpsAlongN = how many warp-tiles fit across the block's N (a COUNT of warps, not a column width).
+  // It is the width of the warp grid, used to turn the flat warpIdx into (warpRow, warpCol).
+  const uint warpsAlongN = K8B_BN / K8B_WN;
+  const uint warpRowOffset = (warpIdx / warpsAlongN) * K8B_WM;   // this warp's top row in the block
+  const uint warpColOffset = (warpIdx % warpsAlongN) * K8B_WN;   // this warp's left col in the block
+  const uint threadColInWarp = laneIdx % K8B_WNX;                // 0..WNX-1  adjacent lanes -> adjacent cols
+  const uint threadRowInWarp = laneIdx / K8B_WNX;                // 0..WMX-1
+  const uint computeRowInTile = warpRowOffset + threadRowInWarp * K8B_TM;
+  // (the column base depends on which of the WNITER groups; computed in the loop)
+  // -------------------------------------------------------------------------------
+
+  const uint a4PerRow = K8B_BK / 4;  // grid-stride loaders, identical in spirit to k6's
+  const uint b4PerRow = K8B_BN / 4;
+
+  for (uint bkIdx = 0; bkIdx < K; bkIdx += K8B_BK) {
+    for (uint t = threadIdx.x; t < K8B_BM * a4PerRow; t += totalThreads) {
+      const uint mRow = t / a4PerRow;
+      const uint kCol = (t % a4PerRow) * 4;
+      const uint gRow = blockRowOffset + mRow;
+      const uint gCol = bkIdx + kCol;
+      float4 tmp = {0, 0, 0, 0};
+      if (gRow < M && gCol + 3 < K) tmp = reinterpret_cast<float4*>(&A[gRow * K + gCol])[0];
+      As[kCol + 0][mRow] = tmp.x;
+      As[kCol + 1][mRow] = tmp.y;
+      As[kCol + 2][mRow] = tmp.z;
+      As[kCol + 3][mRow] = tmp.w;
+    }
+    for (uint t = threadIdx.x; t < K8B_BK * b4PerRow; t += totalThreads) {
+      const uint kRow = t / b4PerRow;
+      const uint nCol = (t % b4PerRow) * 4;
+      const uint gRow = bkIdx + kRow;
+      const uint gCol = blockColOffset + nCol;
+      float4 tmp = {0, 0, 0, 0};
+      if (gRow < K && gCol + 3 < N) tmp = reinterpret_cast<float4*>(&B[gRow * N + gCol])[0];
+      Bs[kRow][nCol + 0] = tmp.x;
+      Bs[kRow][nCol + 1] = tmp.y;
+      Bs[kRow][nCol + 2] = tmp.z;
+      Bs[kRow][nCol + 3] = tmp.w;
+    }
+
+    __syncthreads();
+
+    // COMPUTE — k6's loop, with CHANGE (2): a WNITER loop over column-groups.
+    // Atmp (the TM A-values) is loaded once and reused across all WNITER groups.
+    float Atmp[K8B_TM] = {0.0};
+    float Btmp[K8B_WNITER * K8B_TN] = {0.0};
+#pragma unroll
+    for (uint dotIdx = 0; dotIdx < K8B_BK; dotIdx++) {
+#pragma unroll
+      for (uint tm = 0; tm < K8B_TM; tm++) Atmp[tm] = As[dotIdx][computeRowInTile + tm];
+#pragma unroll
+      for (uint w = 0; w < K8B_WNITER; w++) {
+        const uint colBase = warpColOffset + w * K8B_WSUBN + threadColInWarp * K8B_TN;
+#pragma unroll
+        for (uint tn = 0; tn < K8B_TN; tn++) Btmp[w * K8B_TN + tn] = Bs[dotIdx][colBase + tn];
+      }
+#pragma unroll
+      for (uint tm = 0; tm < K8B_TM; tm++)
+#pragma unroll
+        for (uint j = 0; j < K8B_WNITER * K8B_TN; j++) product[tm][j] += Atmp[tm] * Btmp[j];
+    }
+
+    __syncthreads();
+  }
+
+  // STORE — k6's store, walking the WNITER groups so columns land in the right place.
+  for (uint tm = 0; tm < K8B_TM; tm++) {
+    const uint row = blockRowOffset + computeRowInTile + tm;
+    if (row >= M) continue;
+    for (uint w = 0; w < K8B_WNITER; w++) {
+      const uint colBase = blockColOffset + warpColOffset + w * K8B_WSUBN + threadColInWarp * K8B_TN;
+      for (uint tn = 0; tn < K8B_TN; tn++) {
+        const uint col = colBase + tn;
+        if (col >= N) continue;
+        const uint Cidx = col + row * N;
+        const float v = product[tm][w * K8B_TN + tn];
+        if (beta == 0) C[Cidx] = alpha * v;
+        else C[Cidx] = alpha * v + beta * C[Cidx];
+      }
     }
   }
 }
@@ -1478,6 +1626,19 @@ void matmul(float* C_h, float* A_h, int A_m, int A_n, float* B_h, int B_m, int B
     }
   }
 
+  else if (algo == K8bWarptiledK6Style) {
+    dim3 blockDim((K8B_BM * K8B_BN) / (K8B_TM * K8B_TN * K8B_WNITER));
+    dim3 gridDim(ceil((float)B_n / K8B_BN), ceil((float)A_m / K8B_BM));
+    sgemm_8b_warptiled_k6style<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+    cudaDeviceSynchronize();
+    WALL_START(k8b_warptiled_k6style);
+    sgemm_8b_warptiled_k6style<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+    cudaDeviceSynchronize();
+    WALL_END(k8b_warptiled_k6style);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) { std::cout << "Kernel crashed :[" << std::endl << cudaGetErrorString(err) << std::endl; }
+  }
+
   cudaMemcpy(C_h, C_d, sizeof(float) * A_m * B_n, cudaMemcpyDeviceToHost);
 
   cudaFree(A_d);
@@ -1566,6 +1727,11 @@ int main() {
   matmul(J, A, A_m, A_n, B, A_n, B_n, K8Warptiling, handle);
 
   compareResults(C, J, A_m * B_n, "cublas v K8 warptiling");
+
+  float* J2 = new float[A_m * B_n];
+  matmul(J2, A, A_m, A_n, B, A_n, B_n, K8bWarptiledK6Style, handle);
+
+  compareResults(C, J2, A_m * B_n, "cublas v K8b warptiled (k6-style)");
 
   float* L = new float[A_m * B_n];
   matmul(L, A, A_m, A_n, B, A_n, B_n, K9DoubleBuffer, handle);
