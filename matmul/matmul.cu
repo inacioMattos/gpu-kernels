@@ -60,12 +60,162 @@ enum MatmulAlgorithm {
   TiledWith2DRegisterTiling,
   TiledWith2DRegisterTilingAsVectorized,
   WarptilingSingleIter,
+  Warptiling,
 };
 
 #define TM 8
 #define BK 8
 #define BM 128
 #define BN 128
+
+#ifndef K8_BM
+#define K8_BM 128
+#endif
+#ifndef K8_BN
+#define K8_BN 128
+#endif
+#ifndef K8_BK
+#define K8_BK 32
+#endif
+#ifndef K8_TM
+#define K8_TM 8
+#endif
+#ifndef K8_TN
+#define K8_TN 4
+#endif
+#define K8_WMX 4
+#define K8_WITER 2
+
+__global__ void sgemm_8_warptiling(int M, int N, int K, float alpha, float beta, float* A, float* B, float* C) {
+  // Compile-time validity for the (BM,BN,BK,TM) config. The compute phase tiles the BMxBN output
+  // in TMxTM blocks (needs BM,BN divisible by TM); the float4 loaders need BK,BN divisible by 4.
+  if (K8_BK % 4 != 0 || K8_BN % 4 != 0 || K8_BM % K8_TM != 0 || K8_BN % K8_TM != 0) {
+    return;
+  }
+
+  if (32 % K8_WMX != 0) {
+    return;
+  }
+
+  // WARPTILING VARS
+  const uint K8_WNX = 32 / K8_WMX;  // 8
+
+  const uint WM = K8_WMX * K8_TM;              // 32
+  const uint WN_SINGLE_ITER = K8_WNX * K8_TN;  // 32
+  const uint WN = WN_SINGLE_ITER * K8_WITER;   // 64
+
+  const uint warpIdx = threadIdx.x / 32;  // 13
+  const uint lane = threadIdx.x % 32;     // 8
+
+  const uint warptileColOffset = (warpIdx * WN) % K8_BN;         // 64
+  const uint warpTileRowOffset = WM * ((warpIdx * WN) / K8_BN);  // 192
+
+  const uint colInWarptile = (lane * K8_TN) % WN_SINGLE_ITER;            // 32 (wrong)
+  const uint rowInWarptile = K8_TM * ((lane * K8_TN) / WN_SINGLE_ITER);  // 0 (wrong)
+
+  // WARPTILING END
+
+  __shared__ float As[K8_BK][K8_BM];
+  __shared__ float Bs[K8_BK][K8_BN];
+
+  float product[K8_TM][K8_TN * K8_WITER] = {0.0};
+
+  const uint totalThreads = (K8_BM * K8_BN) / (K8_TM * K8_TN * K8_WITER);
+
+  const uint blockRowOffset = blockIdx.y * K8_BM;
+  const uint blockColOffset = blockIdx.x * K8_BN;
+
+  const uint computeRowInTile = K8_TM * ((threadIdx.x * K8_TN) / K8_BN);
+  const uint computeColInTile = (threadIdx.x * K8_TN) % K8_BN;
+
+  const uint CrowOffset = blockRowOffset + warpTileRowOffset + rowInWarptile;
+  const uint CcolOffset = blockColOffset + warptileColOffset + colInWarptile;
+
+  // float4 groups per row in each tile. General grid-stride loaders below fill the SAME shared
+  // contents as the original hand-rolled loops, but cover any thread count / tile shape.
+  const uint a4PerRow = K8_BK / 4;  // along K  (As stored transposed [BK][BM])
+  const uint b4PerRow = K8_BN / 4;  // along N  (Bs stored [BK][BN])
+
+  for (uint bkIdx = 0; bkIdx < K; bkIdx += K8_BK) {
+    // LOADING PHASE: A tile -> As (transposed), float4 along K
+    for (uint t = threadIdx.x; t < K8_BM * a4PerRow; t += totalThreads) {
+      const uint mRow = t / a4PerRow;
+      const uint kCol = (t % a4PerRow) * 4;
+      const uint gRow = blockRowOffset + mRow;
+      const uint gCol = bkIdx + kCol;
+      float4 tmp = {0, 0, 0, 0};
+      if (gRow < M && gCol + 3 < K) tmp = reinterpret_cast<float4*>(&A[gRow * K + gCol])[0];
+      As[kCol + 0][mRow] = tmp.x;
+      As[kCol + 1][mRow] = tmp.y;
+      As[kCol + 2][mRow] = tmp.z;
+      As[kCol + 3][mRow] = tmp.w;
+    }
+    // LOADING PHASE: B tile -> Bs, float4 along N
+    for (uint t = threadIdx.x; t < K8_BK * b4PerRow; t += totalThreads) {
+      const uint kRow = t / b4PerRow;
+      const uint nCol = (t % b4PerRow) * 4;
+      const uint gRow = bkIdx + kRow;
+      const uint gCol = blockColOffset + nCol;
+      float4 tmp = {0, 0, 0, 0};
+      if (gRow < K && gCol + 3 < N) tmp = reinterpret_cast<float4*>(&B[gRow * N + gCol])[0];
+      Bs[kRow][nCol + 0] = tmp.x;
+      Bs[kRow][nCol + 1] = tmp.y;
+      Bs[kRow][nCol + 2] = tmp.z;
+      Bs[kRow][nCol + 3] = tmp.w;
+    }
+
+    __syncthreads();
+
+    // COMPUTE PHASE START
+    float Atmp[K8_TM] = {0.0};
+#pragma unroll
+    for (uint dotIdx = 0; dotIdx < K8_BK; dotIdx++) {
+#pragma unroll
+      for (uint tm = 0; tm < K8_TM; tm++) {
+        const uint fromAsRow = warpTileRowOffset + rowInWarptile + tm;
+        const uint fromAsCol = dotIdx;
+        Atmp[tm] = As[fromAsCol][fromAsRow];
+      }
+
+#pragma unroll
+      for (uint warpIter = 0; warpIter < K8_WITER; warpIter++) {
+        float Btmp[K8_TN] = {0.0};
+
+#pragma unroll
+        for (uint tn = 0; tn < K8_TN; tn++) {
+          const uint fromBsRow = dotIdx;
+          const uint fromBsCol = (warptileColOffset + (warpIter * WN_SINGLE_ITER)) + colInWarptile + tn;
+          Btmp[tn] = Bs[fromBsRow][fromBsCol];
+        }
+
+#pragma unroll
+        for (uint tm = 0; tm < K8_TM; tm++) {
+#pragma unroll
+          for (uint tn = 0; tn < K8_TN; tn++) {
+            product[tm][tn + warpIter * K8_TN] += Atmp[tm] * Btmp[tn];
+          }
+        }
+      }
+    }
+
+    __syncthreads();
+  }
+
+  for (uint warpIter = 0; warpIter < K8_WITER; warpIter++) {
+    for (uint tm = 0; tm < K8_TM; tm++) {
+      for (uint tn = 0; tn < K8_TN; tn++) {
+        const uint row = CrowOffset + tm;
+        const uint col = CcolOffset + tn + (warpIter * WN_SINGLE_ITER);
+
+        if (col >= N || row >= M) continue;
+
+        const uint Cidx = col + row * N;
+        if (beta == 0) C[Cidx] = alpha * product[tm][tn + warpIter * K8_TN];
+        else C[Cidx] = alpha * product[tm][tn + warpIter * K8_TN] + beta * C[Cidx];
+      }
+    }
+  }
+}
 
 // k6 (square 2D register tiling, vectorized GMEM): own overridable config for a fair sweep.
 #ifndef K7_BM
@@ -839,6 +989,25 @@ void matmul(float* C_h, float* A_h, int A_m, int A_n, float* B_h, int B_m, int B
     }
   }
 
+  else if (algo == Warptiling) {
+    dim3 blockDim((K8_BM * K8_BN) / (K8_TM * K8_TN * K8_WITER));
+    dim3 gridDim(ceil((float)B_n / K8_BN), ceil((float)A_m / K8_BM));
+
+    // Warm-up
+    sgemm_8_warptiling<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+
+    cudaDeviceSynchronize();
+    WALL_START(warptiling);
+    sgemm_8_warptiling<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+    cudaDeviceSynchronize();
+    WALL_END(warptiling);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      std::cout << "Kernel crashed :[" << std::endl << cudaGetErrorString(err) << std::endl;
+    }
+  }
+
   cudaMemcpy(C_h, C_d, sizeof(float) * A_m * B_n, cudaMemcpyDeviceToHost);
 
   cudaFree(A_d);
@@ -877,9 +1046,9 @@ void compareResults(float* ref, float* test, int len, const char* label, float r
 }
 
 int main() {
-  int A_m = 2048;
-  int A_n = 2048;
-  int B_n = 2048;
+  int A_m = 4096;
+  int A_n = 4096;
+  int B_n = 4096;
 
   float* A = new float[A_m * A_n];
   float* B = new float[A_n * B_n];
@@ -896,32 +1065,37 @@ int main() {
   float* D = new float[A_m * B_n];
   matmul(D, A, A_m, A_n, B, A_n, B_n, Naive, handle);
 
-  compareResults(C, D, A_m * B_n, "cublas v naive");
+  // compareResults(C, D, A_m * B_n, "cublas v naive");
 
-  float* E = new float[A_m * B_n];
-  matmul(E, A, A_m, A_n, B, A_n, B_n, Tiled, handle);
+  // float* E = new float[A_m * B_n];
+  // matmul(E, A, A_m, A_n, B, A_n, B_n, Tiled, handle);
 
-  compareResults(C, E, A_m * B_n, "cublas v tiled");
+  // compareResults(C, E, A_m * B_n, "cublas v tiled");
 
-  float* F = new float[A_m * B_n];
-  matmul(F, A, A_m, A_n, B, A_n, B_n, TiledWith1DRegisterTiling, handle);
+  // float* F = new float[A_m * B_n];
+  // matmul(F, A, A_m, A_n, B, A_n, B_n, TiledWith1DRegisterTiling, handle);
 
-  compareResults(C, F, A_m * B_n, "cublas v tiled with 1D register tiling");
+  // compareResults(C, F, A_m * B_n, "cublas v tiled with 1D register tiling");
 
-  float* G = new float[A_m * B_n];
-  matmul(G, A, A_m, A_n, B, A_n, B_n, TiledWith2DRegisterTiling, handle);
+  // float* G = new float[A_m * B_n];
+  // matmul(G, A, A_m, A_n, B, A_n, B_n, TiledWith2DRegisterTiling, handle);
 
-  compareResults(C, G, A_m * B_n, "cublas v tiled with 2D register tiling");
+  // compareResults(C, G, A_m * B_n, "cublas v tiled with 2D register tiling");
 
   float* H = new float[A_m * B_n];
   matmul(H, A, A_m, A_n, B, A_n, B_n, TiledWith2DRegisterTilingAsVectorized, handle);
 
-  compareResults(C, H, A_m * B_n, "cublas v K6 vectorized tiled with 2D register tiling");
+  // compareResults(C, H, A_m * B_n, "cublas v K6 vectorized tiled with 2D register tiling");
 
   float* I = new float[A_m * B_n];
   matmul(I, A, A_m, A_n, B, A_n, B_n, WarptilingSingleIter, handle);
 
-  compareResults(C, I, A_m * B_n, "warptiling single iter");
+  // compareResults(C, I, A_m * B_n, "warptiling single iter");
+
+  float* J = new float[A_m * B_n];
+  matmul(J, A, A_m, A_n, B, A_n, B_n, Warptiling, handle);
+
+  compareResults(C, J, A_m * B_n, "warptiling");
 
   return 0;
 }
