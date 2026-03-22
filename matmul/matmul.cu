@@ -69,7 +69,7 @@ enum MatmulAlgorithm {
 #define BN 128
 
 #ifndef K8_BM
-#define K8_BM 128
+#define K8_BM 64
 #endif
 #ifndef K8_BN
 #define K8_BN 128
@@ -83,7 +83,7 @@ enum MatmulAlgorithm {
 #ifndef K8_TN
 #define K8_TN 4
 #endif
-#define K8_WMX 4
+#define K8_WMX 2
 #define K8_WITER 2
 
 __global__ void sgemm_8_warptiling(int M, int N, int K, float alpha, float beta, float* A, float* B, float* C) {
@@ -174,7 +174,12 @@ __global__ void sgemm_8_warptiling(int M, int N, int K, float alpha, float beta,
       for (uint tm = 0; tm < K8_TM; tm++) {
         const uint fromAsRow = warpTileRowOffset + rowInWarptile + tm;
         const uint fromAsCol = dotIdx;
-        Atmp[tm] = As[fromAsCol][fromAsRow];
+
+        float4 tmp = reinterpret_cast<float4*>(&As[fromAsCol][fromAsRow])[0];
+        Atmp[tm + 0] = tmp.x;
+        Atmp[tm + 1] = tmp.y;
+        Atmp[tm + 2] = tmp.z;
+        Atmp[tm + 3] = tmp.w;
       }
 
 #pragma unroll
@@ -182,10 +187,15 @@ __global__ void sgemm_8_warptiling(int M, int N, int K, float alpha, float beta,
         float Btmp[K8_TN] = {0.0};
 
 #pragma unroll
-        for (uint tn = 0; tn < K8_TN; tn++) {
+        for (uint tn = 0; tn < K8_TN; tn += 4) {
           const uint fromBsRow = dotIdx;
           const uint fromBsCol = (warptileColOffset + (warpIter * WN_SINGLE_ITER)) + colInWarptile + tn;
-          Btmp[tn] = Bs[fromBsRow][fromBsCol];
+
+          float4 tmp = reinterpret_cast<float4*>(&Bs[fromBsRow][fromBsCol])[0];
+          Btmp[tn + 0] = tmp.x;
+          Btmp[tn + 1] = tmp.y;
+          Btmp[tn + 2] = tmp.z;
+          Btmp[tn + 3] = tmp.w;
         }
 
 #pragma unroll
