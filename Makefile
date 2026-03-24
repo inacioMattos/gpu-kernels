@@ -4,7 +4,7 @@ NVCCFLAGS ?= -O3 -std=c++17
 KERNELS := vector_add reduction transpose softmax
 BINARIES := $(addprefix build/,$(KERNELS))
 
-.PHONY: all check matmul
+.PHONY: all check matmul benchmark
 all: $(BINARIES)
 
 build:
@@ -20,6 +20,11 @@ matmul: build/matmul
 
 build/matmul: matmul/matmul.cu | build
 	$(NVCC) $(NVCCFLAGS) -arch=$(ARCH) $< -o $@ -lcublas
+
+benchmark: build/benchmark
+
+build/benchmark: matmul/benchmark.cu matmul/matmul.cu matmul/k10_experiment.cuh common/check.cuh | build
+	$(NVCC) $(NVCCFLAGS) -lineinfo -arch=$(ARCH) $< -o $@ -lcublas
 
 check: all
 	@set -e; for kernel in $(BINARIES); do ./$$kernel; done

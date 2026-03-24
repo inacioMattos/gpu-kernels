@@ -1,0 +1,10 @@
+Pre-benchmark validation on RTX 5070 Ti:
+
+compute-sanitizer --tool memcheck --error-exitcode 1 ./build/benchmark 256 1 1 build/sanity-samples.csv
+
+Exit status: 0
+All 11 variants: PASS
+Compute Sanitizer: ERROR SUMMARY: 0 errors
+
+Sanitizer timings are instrumented and are excluded from the published results.
+The 2048/4096 timings were collected without the sanitizer.

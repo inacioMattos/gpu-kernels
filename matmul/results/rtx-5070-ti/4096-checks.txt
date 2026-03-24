@@ -1,0 +1,11 @@
+cublas_fp32: PASS
+cublas_default: PASS
+naive: PASS
+shared_tiled: PASS
+register_1d: PASS
+register_2d_v1: PASS
+register_2d_v2: PASS
+vectorized_k6: PASS
+warp_single_k7: PASS
+warp_multi_k8: PASS
+experiment_k10: PASS

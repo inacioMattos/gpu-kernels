@@ -171,7 +171,7 @@ __global__ void sgemm_8_warptiling(int M, int N, int K, float alpha, float beta,
 #pragma unroll
     for (uint dotIdx = 0; dotIdx < K8_BK; dotIdx++) {
 #pragma unroll
-      for (uint tm = 0; tm < K8_TM; tm++) {
+      for (uint tm = 0; tm < K8_TM; tm += 4) {
         const uint fromAsRow = warpTileRowOffset + rowInWarptile + tm;
         const uint fromAsCol = dotIdx;
 
