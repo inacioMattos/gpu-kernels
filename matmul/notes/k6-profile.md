@@ -3,7 +3,7 @@
 > repository README for the reproducible rerun. Kernel numbering/configurations
 > in these notes differ from the latest `matmul.cu`.
 
-# k6 SGEMM profiling — RTX 5070 Ti (sm_120), M=N=K=2048
+# k6 SGEMM profiling - RTX 5070 Ti (sm_120), M=N=K=2048
 
 Kernel: `sgemm_6_register_2dtiling_vectorized_As`
 BM=BN=128, BK=8, TM=8 (8×8 reg tile), 256 threads/block, grid 16×16.
@@ -28,7 +28,7 @@ cuBLAS 549 µs · k6 786 µs (wall) · ncu duration 936 µs (profiling overhead)
 
 | reason | % | meaning |
 |---|---|---|
-| not_selected | 24.3 | (a warp *was* ready — contention, not a true stall) |
+| not_selected | 24.3 | (a warp *was* ready - contention, not a true stall) |
 | **long_scoreboard** | **17.3** | waiting on **global** loads of A/B |
 | selected | 15.7 | actual issue |
 | **short_scoreboard** | **15.3** | waiting on **shared** loads (Atmp/Btmp) |
@@ -53,7 +53,7 @@ blocks/SM). With just 1.49 eligible warps/scheduler there aren't enough warps to
 2. **Global store coalescing.** NCU: store pattern uses **only 4 of 32 sectors** per request.
    The C write-out is scalar with the same stride-8 thread→column mapping.
 
-3. **DRAM is idle (5.6%)** — this kernel is latency-bound on the L1/shared path, not bandwidth.
+3. **DRAM is idle (5.6%)** - this kernel is latency-bound on the L1/shared path, not bandwidth.
 
 ## Plan (ranked by evidence × effort)
 
@@ -80,7 +80,7 @@ Start with 1+2: smallest diff, directly targets the two metrics that are red.
 | **k8 (warptiling, BK=16, 64×128, 128 thr)** | **654 µs** | **+19%** |
 
 - **k7** (plan items 1+2: float4 LDS.128 register caches + STG.128 store): only ~3%.
-  Re-profiling showed the 33.5M shared-load conflicts were **unchanged** — they're structural to
+  Re-profiling showed the 33.5M shared-load conflicts were **unchanged** - they're structural to
   the warp's stride-8 thread→column map, not the scalar-vs-vector access width.
 - **Occupancy is NOT the lever:** forcing 3 blocks/SM via `__launch_bounds__(256,3)` (0 spills,
   33%→50% occ) made k6 *slower* (845 µs). More warps just contend on the already-65%-busy
@@ -91,9 +91,9 @@ Start with 1+2: smallest diff, directly targets the two metrics that are red.
   - shared-LD bank conflicts **33.5M → 142K** (236×)
   - Compute (SM) **52% → 63%**, eligible warps/sched **1.49 → 2.17**, occupancy **33% → 42%**
 - Tuning: 64×128 block / 128 threads / BK=16 beat the textbook 128×128 / 256-thread configs on
-  the 5070 Ti — smaller tiles → 512 blocks → better wave balance (the 128×128 config ran only
+  the 5070 Ti - smaller tiles → 512 blocks → better wave balance (the 128×128 config ran only
   ~1.8 waves, leaving a tail).
 
 Remaining +19% gap: compute (63%) is now the heavier pipe. Closing it needs double-buffered
-`cp.async` global→shared prefetch to overlap the load phase with compute — diminishing returns
+`cp.async` global→shared prefetch to overlap the load phase with compute - diminishing returns
 for a hand-written FP32 SGEMM.

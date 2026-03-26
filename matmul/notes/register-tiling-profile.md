@@ -3,7 +3,7 @@
 > repository README for the reproducible rerun. Kernel numbering/configurations
 > in these notes differ from the latest `matmul.cu`.
 
-# sgemm5 v1 vs v2 — why v1 is ~1.5–1.8× slower
+# sgemm5 v1 vs v2 - why v1 is ~1.5–1.8× slower
 
 **HW:** RTX 5070 Ti (Blackwell, sm_120). **Shapes:** M=N=K=2048, BM=BN=128, BK=8, TM=TN=8, 256 threads/block.
 Standalone harness (`harness/harness.cu`), `-O3 -lineinfo -arch=sm_120`.
@@ -21,9 +21,9 @@ Standalone harness (`harness/harness.cu`), `-O3 -lineinfo -arch=sm_120`.
 | shared-mem inst | 4.61e7 | 4.61e7 | 1.00× |
 | global-ld inst | 4.19e6 | 4.33e6 | 0.97× |
 | bank conflicts | 6.77e7 | 6.73e7 | 1.01× |
-| registers / occupancy | 93 / 30.7% | 93 / 29.7% | — |
+| registers / occupancy | 93 / 30.7% | 93 / 29.7% | - |
 
-The two kernels are **algorithmically identical** — same thread→tile mapping, same SMEM
+The two kernels are **algorithmically identical** - same thread→tile mapping, same SMEM
 access pattern, same FFMA count, same global-load count, same bank-conflict count, same
 occupancy. So the slowdown is **not** the algorithm, memory layout, or occupancy.
 
@@ -58,9 +58,9 @@ Two compounding effects, both visible in NCU:
    In v2 the SMEM-fill loop is unrolled, so the 4 independent `LDG`s per phase are issued
    back-to-back and sit in flight together; their ~hundreds-of-cycle latency overlaps. In v1
    the same loop is a real loop: each iteration computes its address (dependent IMAD chain),
-   issues one `LDG`, then a branch must resolve before the next address/load — the loads
+   issues one `LDG`, then a branch must resolve before the next address/load - the loads
    serialize and each one's latency is exposed. That is exactly the **4.5× `long_scoreboard`
-   stall** (4.28 vs 0.94 cyc/issue) — same number of loads, far worse overlap. It also shows
+   stall** (4.28 vs 0.94 cyc/issue) - same number of loads, far worse overlap. It also shows
    up as v1's much lower memory throughput (43% vs 75%).
 
 2. **Instruction overhead.** The non-unrolled loops add +37% total instructions, 2.9× branches,
@@ -72,7 +72,7 @@ Net: v1 stalls more on memory *and* spends more cycles on bookkeeping, so its FM
 
 ## Fix
 Make v1's bounds compile-time constant so it unrolls like v2:
-- Replace `blockDim.x` with a `constexpr`/`#define` thread count (256) — derive `subtitleAHeight`
+- Replace `blockDim.x` with a `constexpr`/`#define` thread count (256) - derive `subtitleAHeight`
   etc. from constants, not `blockDim.x`.
 - Replace `ceil((float)K / BK)` with the integer `for (tile=0; tile*BK < K; tile++)` (or `K/BK`
   when divisible) to drop the I2F/F2I and give a constant trip count.

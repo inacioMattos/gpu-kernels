@@ -3,11 +3,11 @@
 Working through CUDA and PMPP. Mostly small experiments to understand where the
 time goes.
 
-- `vector_add/` — grid-stride loop
-- `reduction/` — shared-memory sum, multiple passes
-- `transpose/` — 32x32 tiles with padding
-- `softmax/` — row-wise max/sum reductions
-- `matmul/` — naive through register/warp tiling, compared against cuBLAS
+- `vector_add/` - grid-stride loop
+- `reduction/` - shared-memory sum, multiple passes
+- `transpose/` - 32x32 tiles with padding
+- `softmax/` - row-wise max/sum reductions
+- `matmul/` - naive through register/warp tiling, compared against cuBLAS
 
 Build with nvcc. Set `ARCH` for your card.
 
@@ -28,7 +28,8 @@ Notes:
 - Softmax expects finite inputs.
 - `matmul/sweep_k8.py` runs from `matmul/`. Its architecture is hardcoded, and
   WMX/WITER are fixed in the CUDA source despite appearing in the sweep.
-- Some matmul history contains AI-assisted experiments.
+- The optimization log was written with AI. I wrote the matmul kernels from
+  scratch by hand, except K10 and K11, which were AI-assisted.
 
 ## Matmul: getting close to cuBLAS on my RTX 5070 Ti
 
@@ -91,7 +92,7 @@ These are recorded experiment results; the fresh rerun is linked below.
 4. **Move contiguous values together: 1015 → 765 µs (1.33×).** K6 uses `float4`
    global loads and stages A transposed in shared memory. That reduces load
    instruction count and arranges the values for register reuse. Simply
-   vectorizing shared loads on the old mapping, K7, gave **768 µs**—essentially
+   vectorizing shared loads on the old mapping, K7, gave **768 µs** - essentially
    flat. Wider loads alone didn't fix the access pattern.
 5. **Design the warp's access pattern: 765 → 675 µs (1.13×).** Warp tiling gives
    each warp a structured output region and more reuse across subtiles. In a
