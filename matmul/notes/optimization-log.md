@@ -4,7 +4,7 @@
 
 > Archived experiment notes from `pmpp-book/my-own/matmul`. These are historical
 > measurements and interpretations, not the current benchmark results. See the
-> repository README for the reproducible rerun. Kernel numbering/configurations
+> [matmul README](../README.md) for the reproducible rerun. Kernel numbering/configurations
 > in these notes differ from the latest `matmul.cu`.
 
 # SGEMM on an RTX 5070 Ti (sm_120): from naïve to cuBLAS parity

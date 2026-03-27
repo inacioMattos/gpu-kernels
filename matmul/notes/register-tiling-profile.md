@@ -1,6 +1,6 @@
 > Archived experiment notes from `pmpp-book/my-own/matmul`. These are historical
 > measurements and interpretations, not the current benchmark results. See the
-> repository README for the reproducible rerun. Kernel numbering/configurations
+> [matmul README](../README.md) for the reproducible rerun. Kernel numbering/configurations
 > in these notes differ from the latest `matmul.cu`.
 
 # sgemm5 v1 vs v2 - why v1 is ~1.5–1.8× slower
