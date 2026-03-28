@@ -2,7 +2,6 @@
 #define main original_matmul_main
 #include "matmul.cu"
 #undef main
-#include "k10_experiment.cuh"
 #include "../common/check.cuh"
 #include <algorithm>
 #include <fstream>
@@ -18,7 +17,7 @@ void blas_check(cublasStatus_t status) {
 
 const char* names[] = {"cublas_fp32", "cublas_default", "naive", "shared_tiled",
   "register_1d", "register_2d_v1", "register_2d_v2", "vectorized_k6",
-  "warp_single_k7", "warp_multi_k8", "experiment_k10"};
+  "warp_single_k7", "warp_multi_k8", "warp_vectorized_k10"};
 constexpr int COUNT = sizeof(names) / sizeof(names[0]);
 
 void launch(int algo, int n, float* a, float* b, float* c, cublasHandle_t strict, cublasHandle_t normal) {
@@ -45,7 +44,7 @@ void launch(int algo, int n, float* a, float* b, float* c, cublasHandle_t strict
     case 9:
       sgemm_8_warptiling<<<dim3(n / K8_BN, n / K8_BM), K8_BM * K8_BN / (K8_TM * K8_TN * K8_WITER)>>>(n,n,n,1,0,a,b,c); break;
     case 10:
-      k10_experiment::sgemm_10_vec_smem<<<dim3(n / K10_BN, n / K10_BM), K10_NUM_THREADS>>>(n,n,n,1,0,a,b,c); break;
+      sgemm_10_vec_smem<<<dim3(n / K10_BN, n / K10_BM), K10_NUM_THREADS>>>(n,n,n,1,0,a,b,c); break;
   }
   CUDA_CHECK(cudaGetLastError());
 }

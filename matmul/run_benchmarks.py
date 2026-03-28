@@ -22,7 +22,7 @@ def query_gpu():
         'nvidia-smi', '--query-gpu=name,driver_version,temperature.gpu,pstate,clocks.sm,clocks.mem,power.draw,power.limit,utilization.gpu',
         '--format=csv'], text=True).strip()
 
-sources = ['matmul/benchmark.cu', 'matmul/matmul.cu', 'matmul/k10_experiment.cuh', 'common/check.cuh', 'Makefile']
+sources = ['matmul/benchmark.cu', 'matmul/matmul.cu', 'common/check.cuh', 'Makefile']
 metadata = {
     'started_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
     'platform': platform.system() + ' ' + platform.release(),

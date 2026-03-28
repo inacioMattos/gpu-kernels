@@ -96,7 +96,7 @@ void compareResults(float* ref, float* test, int len, const char* label, float r
   if (mismatches == 0) {
     std::cout << label << ": PASS (max rel diff = " << maxRelDiff << ", max abs diff = " << maxAbsDiff << ")" << std::endl;
   } else {
-    std::cout << label << ": FAIL — " << mismatches << "/" << len << " mismatches" << std::endl;
+    std::cout << label << ": FAIL - " << mismatches << "/" << len << " mismatches" << std::endl;
     std::cout << "  worst: ref[" << worstIdx << "] = " << ref[worstIdx] << ", test[" << worstIdx << "] = " << test[worstIdx] << ", abs diff = " << maxAbsDiff << ", rel diff = " << maxRelDiff
               << std::endl;
   }

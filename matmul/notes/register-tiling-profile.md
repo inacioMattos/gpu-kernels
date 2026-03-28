@@ -23,7 +23,7 @@ Standalone harness (`harness/harness.cu`), `-O3 -lineinfo -arch=sm_120`.
 | bank conflicts | 6.77e7 | 6.73e7 | 1.01× |
 | registers / occupancy | 93 / 30.7% | 93 / 29.7% | - |
 
-The two kernels are **algorithmically identical** - same thread→tile mapping, same SMEM
+The two kernels are **algorithmically identical** - same thread->tile mapping, same SMEM
 access pattern, same FFMA count, same global-load count, same bank-conflict count, same
 occupancy. So the slowdown is **not** the algorithm, memory layout, or occupancy.
 
@@ -54,7 +54,7 @@ SASS confirms it (per-kernel instruction histogram):
 ## Why that costs 1.8×, precisely
 Two compounding effects, both visible in NCU:
 
-1. **Lost memory-level parallelism → exposed global latency.** This is the dominant cost.
+1. **Lost memory-level parallelism -> exposed global latency.** This is the dominant cost.
    In v2 the SMEM-fill loop is unrolled, so the 4 independent `LDG`s per phase are issued
    back-to-back and sit in flight together; their ~hundreds-of-cycle latency overlaps. In v1
    the same loop is a real loop: each iteration computes its address (dependent IMAD chain),

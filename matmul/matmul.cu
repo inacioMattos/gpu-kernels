@@ -61,12 +61,154 @@ enum MatmulAlgorithm {
   TiledWith2DRegisterTilingAsVectorized,
   WarptilingSingleIter,
   Warptiling,
+  WarptilingVectorizedShared,
 };
 
 #define TM 8
 #define BK 8
 #define BM 128
 #define BN 128
+
+#ifndef K10_BM
+#define K10_BM 128
+#endif
+#ifndef K10_BN
+#define K10_BN 128
+#endif
+#ifndef K10_BK
+#define K10_BK 16
+#endif
+#ifndef K10_TM
+#define K10_TM 8
+#endif
+#ifndef K10_TN
+#define K10_TN 4
+#endif
+#ifndef K10_WM
+#define K10_WM 64
+#endif
+#ifndef K10_WN
+#define K10_WN 64
+#endif
+#ifndef K10_WNITER
+#define K10_WNITER 4
+#endif
+#ifndef K10_NUM_THREADS
+#define K10_NUM_THREADS 128
+#endif
+
+#ifndef K10_MINBLOCKS
+#define K10_MINBLOCKS 1
+#endif
+#define K10_ASTRIDE (K10_BM + 4)
+
+// Requires M/N multiples of 128 and K a multiple of 16.
+__global__ void __launch_bounds__(K10_NUM_THREADS, K10_MINBLOCKS)
+    sgemm_10_vec_smem(int M, int N, int K, float alpha, float beta, const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C) {
+  const uint cRow = blockIdx.y;
+  const uint cCol = blockIdx.x;
+
+  const uint warpIdx = threadIdx.x / 32;
+  const uint warpCol = warpIdx % (K10_BN / K10_WN);
+  const uint warpRow = warpIdx / (K10_BN / K10_WN);
+
+  constexpr uint WMITER = (K10_WM * K10_WN) / (32 * K10_TM * K10_TN * K10_WNITER);
+  constexpr uint WSUBM = K10_WM / WMITER;
+  constexpr uint WSUBN = K10_WN / K10_WNITER;
+
+  const uint threadIdxInWarp = threadIdx.x % 32;
+  const uint threadColInWarp = threadIdxInWarp % (WSUBN / K10_TN);
+  const uint threadRowInWarp = threadIdxInWarp / (WSUBN / K10_TN);
+
+  __shared__ float As[K10_BK * K10_ASTRIDE];
+  __shared__ float Bs[K10_BK * K10_BN];
+
+  A += cRow * K10_BM * K;
+  B += cCol * K10_BN;
+  C += (cRow * K10_BM + warpRow * K10_WM) * N + cCol * K10_BN + warpCol * K10_WN;
+
+  const uint innerRowA = threadIdx.x / (K10_BK / 4);
+  const uint innerColA = threadIdx.x % (K10_BK / 4);
+  constexpr uint rowStrideA = (K10_NUM_THREADS * 4) / K10_BK;
+  const uint innerRowB = threadIdx.x / (K10_BN / 4);
+  const uint innerColB = threadIdx.x % (K10_BN / 4);
+  constexpr uint rowStrideB = K10_NUM_THREADS / (K10_BN / 4);
+
+  float threadResults[WMITER * K10_TM * K10_WNITER * K10_TN] = {0.0};
+  float regM[WMITER * K10_TM] = {0.0};
+  float regN[K10_WNITER * K10_TN] = {0.0};
+
+  for (uint bkIdx = 0; bkIdx < K; bkIdx += K10_BK) {
+    for (uint offset = 0; offset + rowStrideA <= K10_BM; offset += rowStrideA) {
+      float4 tmp = reinterpret_cast<const float4*>(&A[(innerRowA + offset) * K + innerColA * 4])[0];
+      As[(innerColA * 4 + 0) * K10_ASTRIDE + innerRowA + offset] = tmp.x;
+      As[(innerColA * 4 + 1) * K10_ASTRIDE + innerRowA + offset] = tmp.y;
+      As[(innerColA * 4 + 2) * K10_ASTRIDE + innerRowA + offset] = tmp.z;
+      As[(innerColA * 4 + 3) * K10_ASTRIDE + innerRowA + offset] = tmp.w;
+    }
+    for (uint offset = 0; offset + rowStrideB <= K10_BK; offset += rowStrideB) {
+      reinterpret_cast<float4*>(&Bs[(innerRowB + offset) * K10_BN + innerColB * 4])[0] = reinterpret_cast<const float4*>(&B[(innerRowB + offset) * N + innerColB * 4])[0];
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (uint dotIdx = 0; dotIdx < K10_BK; ++dotIdx) {
+#pragma unroll
+      for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+        for (uint i = 0; i < K10_TM; i += 4) {
+          reinterpret_cast<float4*>(&regM[wSubRowIdx * K10_TM + i])[0] =
+              reinterpret_cast<float4*>(&As[(dotIdx * K10_ASTRIDE) + warpRow * K10_WM + wSubRowIdx * WSUBM + threadRowInWarp * K10_TM + i])[0];
+        }
+      }
+#pragma unroll
+      for (uint wSubColIdx = 0; wSubColIdx < K10_WNITER; ++wSubColIdx) {
+        for (uint i = 0; i < K10_TN; i += 4) {
+          reinterpret_cast<float4*>(&regN[wSubColIdx * K10_TN + i])[0] = reinterpret_cast<float4*>(&Bs[(dotIdx * K10_BN) + warpCol * K10_WN + wSubColIdx * WSUBN + threadColInWarp * K10_TN + i])[0];
+        }
+      }
+
+#pragma unroll
+      for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx)
+#pragma unroll
+        for (uint wSubColIdx = 0; wSubColIdx < K10_WNITER; ++wSubColIdx)
+#pragma unroll
+          for (uint resIdxM = 0; resIdxM < K10_TM; ++resIdxM)
+#pragma unroll
+            for (uint resIdxN = 0; resIdxN < K10_TN; ++resIdxN) {
+              threadResults[(wSubRowIdx * K10_TM + resIdxM) * (K10_WNITER * K10_TN) + (wSubColIdx * K10_TN) + resIdxN] += regM[wSubRowIdx * K10_TM + resIdxM] * regN[wSubColIdx * K10_TN + resIdxN];
+            }
+    }
+    A += K10_BK;
+    B += K10_BK * N;
+    __syncthreads();
+  }
+
+  for (uint wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {
+    for (uint wSubColIdx = 0; wSubColIdx < K10_WNITER; ++wSubColIdx) {
+      float* C_interim = C + (wSubRowIdx * WSUBM) * N + wSubColIdx * WSUBN;
+      for (uint resIdxM = 0; resIdxM < K10_TM; resIdxM += 1) {
+        for (uint resIdxN = 0; resIdxN < K10_TN; resIdxN += 4) {
+          const int i = (wSubRowIdx * K10_TM + resIdxM) * (K10_WNITER * K10_TN) + wSubColIdx * K10_TN + resIdxN;
+          float* dst = &C_interim[(threadRowInWarp * K10_TM + resIdxM) * N + threadColInWarp * K10_TN + resIdxN];
+          float4 tmp;
+          if (beta == 0) {
+            tmp.x = alpha * threadResults[i + 0];
+            tmp.y = alpha * threadResults[i + 1];
+            tmp.z = alpha * threadResults[i + 2];
+            tmp.w = alpha * threadResults[i + 3];
+          } else {
+            tmp = reinterpret_cast<float4*>(dst)[0];
+            tmp.x = alpha * threadResults[i + 0] + beta * tmp.x;
+            tmp.y = alpha * threadResults[i + 1] + beta * tmp.y;
+            tmp.z = alpha * threadResults[i + 2] + beta * tmp.z;
+            tmp.w = alpha * threadResults[i + 3] + beta * tmp.w;
+          }
+          reinterpret_cast<float4*>(dst)[0] = tmp;
+        }
+      }
+    }
+  }
+}
 
 #ifndef K8_BM
 #define K8_BM 64
@@ -1018,6 +1160,24 @@ void matmul(float* C_h, float* A_h, int A_m, int A_n, float* B_h, int B_m, int B
     }
   }
 
+  else if (algo == WarptilingVectorizedShared) {
+    dim3 blockDim(K10_NUM_THREADS);
+    dim3 gridDim(B_n / K10_BN, A_m / K10_BM);
+
+    sgemm_10_vec_smem<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+
+    cudaDeviceSynchronize();
+    WALL_START(warptiling_vectorized_shared);
+    sgemm_10_vec_smem<<<gridDim, blockDim>>>(A_m, B_n, A_n, 1, 0, A_d, B_d, C_d);
+    cudaDeviceSynchronize();
+    WALL_END(warptiling_vectorized_shared);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      std::cout << "Kernel crashed :[" << std::endl << cudaGetErrorString(err) << std::endl;
+    }
+  }
+
   cudaMemcpy(C_h, C_d, sizeof(float) * A_m * B_n, cudaMemcpyDeviceToHost);
 
   cudaFree(A_d);
@@ -1049,7 +1209,7 @@ void compareResults(float* ref, float* test, int len, const char* label, float r
   if (mismatches == 0) {
     std::cout << label << ": PASS (max rel diff = " << maxRelDiff << ", max abs diff = " << maxAbsDiff << ")" << std::endl;
   } else {
-    std::cout << label << ": FAIL — " << mismatches << "/" << len << " mismatches" << std::endl;
+    std::cout << label << ": FAIL - " << mismatches << "/" << len << " mismatches" << std::endl;
     std::cout << "  worst: ref[" << worstIdx << "] = " << ref[worstIdx] << ", test[" << worstIdx << "] = " << test[worstIdx] << ", abs diff = " << maxAbsDiff << ", rel diff = " << maxRelDiff
               << std::endl;
   }
@@ -1106,6 +1266,11 @@ int main() {
   matmul(J, A, A_m, A_n, B, A_n, B_n, Warptiling, handle);
 
   compareResults(C, J, A_m * B_n, "warptiling");
+
+  float* L = new float[A_m * B_n];
+  matmul(L, A, A_m, A_n, B, A_n, B_n, WarptilingVectorizedShared, handle);
+
+  compareResults(C, L, A_m * B_n, "warptiling vectorized shared");
 
   return 0;
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sweep_k8.py — autotune the k8 warptiling kernel (sgemm_8_warptiling) in matmul.cu.
+sweep_k8.py - autotune the k8 warptiling kernel (sgemm_8_warptiling) in matmul.cu.
 
 Non-destructive: never edits matmul.cu. It compiles the binary once per config with
 `-DK8_*=...` overrides, runs it best-of-N (to ride out thermal/clock noise), parses the
@@ -37,7 +37,7 @@ MAX_THREADS = 1024
 AS_PAD = 4  # set to 0 if your As is NOT padded; only affects the smem estimate
 
 # ---------------------------------------------------------------------------
-# Search space — edit freely. Keep it small-ish; each config costs one nvcc build.
+# Search space - edit freely. Keep it small-ish; each config costs one nvcc build.
 # ---------------------------------------------------------------------------
 SPACE = dict(
     BM=[64, 128, 256],
@@ -161,8 +161,8 @@ def main():
         ratio = (k8 / cub) if (k8 and cub) else None
         results.append(dict(cfg=cfg, **g, regs=regs, spill=spill,
                             verdict=verdict, k8=k8, cublas=cub, ratio=ratio))
-        rstr = f"{k8}us" if k8 else "—"
-        ratiostr = f"{ratio:.3f}x" if ratio else "—"
+        rstr = f"{k8}us" if k8 else "-"
+        ratiostr = f"{ratio:.3f}x" if ratio else "-"
         print(f"[{i}/{len(valid)}] {verdict:5s} {rstr:>7s} ({ratiostr} cublas) "
               f"regs={regs} thr={g['threads']} smem={g['smem']//1024}K {cf} | {tag}")
         if args.cooldown:
@@ -180,7 +180,7 @@ def main():
 
     fails = [r for r in results if r["verdict"] in ("FAIL", "CRASH")]
     if fails:
-        print(f"\n{len(fails)} configs FAILED/CRASHED (correctness bug at that config — "
+        print(f"\n{len(fails)} configs FAILED/CRASHED (correctness bug at that config - "
               f"e.g. the totalThreads÷WITER issue surfaces at larger BK).")
 
     if args.csv:

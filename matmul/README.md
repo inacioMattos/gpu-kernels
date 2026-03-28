@@ -5,11 +5,9 @@ output element through shared-memory tiling, register tiling, vectorized loads,
 and finally warp tiling. The useful part was figuring out *why* each version was
 slow, including a few changes that sounded good but didn't help.
 
-There are two branches of that work here: my current implementation ends at K8
-in [matmul.cu](matmul.cu), while
-[k10_experiment.cuh](k10_experiment.cuh) restores the later optimization
-experiment from an earlier revision. That experiment was AI-assisted; it is
-kept separate so the results are clear about which implementation is running.
+The kernels live together in [matmul.cu](matmul.cu), including K10's vectorized
+warp tiling. K10 and K11 were AI-assisted; I wrote the other matmul kernels
+from scratch by hand. The optimization log was written with AI.
 
 ## Optimization-log scoreboard
 
@@ -42,26 +40,26 @@ These are recorded experiment results; the fresh rerun is linked below.
 
 ## Where the gains came from
 
-1. **Reuse data inside a block: 5900 → 4200 µs (1.40×).** Shared-memory tiling
+1. **Reuse data inside a block: 5900 -> 4200 µs (1.40×).** Shared-memory tiling
    lets threads cooperatively load tiles of A and B, then reuse those values
    across the block. Each thread still computes only one output, leaving lots
    of shared-memory traffic per multiply-add.
-2. **Compute more outputs per thread: 4200 → 1450 → 1015 µs.** With 1-D register
+2. **Compute more outputs per thread: 4200 -> 1450 -> 1015 µs.** With 1-D register
    tiling, one B value contributes to eight output rows: **2.90× over shared
    tiling**. An 8×8 register tile reuses both operands: eight A values and eight
    B values feed 64 FMAs. That adds another **1.43×**.
 3. **Make the compiler's job easier.** The separate
    [V1/V2 profiling experiment](notes/register-tiling-profile.md) recorded
-   **2130 → 1176 µs (1.81×)** for the same basic 2-D tiling algorithm. Constant
+   **2130 -> 1176 µs (1.81×)** for the same basic 2-D tiling algorithm. Constant
    tile geometry enabled loop unrolling and reduced branch/address work. The
    profile recorded **37% more executed instructions in V1**. Those timings
    come from that profiling experiment, not the scoreboard run.
-4. **Move contiguous values together: 1015 → 765 µs (1.33×).** K6 uses `float4`
+4. **Move contiguous values together: 1015 -> 765 µs (1.33×).** K6 uses `float4`
    global loads and stages A transposed in shared memory. That reduces load
    instruction count and arranges the values for register reuse. Simply
    vectorizing shared loads on the old mapping, K7, gave **768 µs** - essentially
    flat. Wider loads alone didn't fix the access pattern.
-5. **Design the warp's access pattern: 765 → 675 µs (1.13×).** Warp tiling gives
+5. **Design the warp's access pattern: 765 -> 675 µs (1.13×).** Warp tiling gives
    each warp a structured output region and more reuse across subtiles. In a
    separately profiled configuration, the [K6 notes](notes/k6-profile.md)
    recorded shared-load bank conflicts falling from **33.5 million to 142,000**
@@ -70,8 +68,8 @@ These are recorded experiment results; the fresh rerun is linked below.
 6. **Vectorize the warp-tile loads and retune: down to 557 µs.** K10 combines
    vectorized shared loads/output stores with a 128×128 block tile, BK=16,
    128 threads, and padded A staging. The log records `dispatch_stall` falling
-   **0.71 → 0.31**, `mio_throttle` **0.17 → 0.10**, and compute throughput
-   **63% → 66%** in its profiling comparison. The combined result is **1.21×
+   **0.71 -> 0.31**, `mio_throttle` **0.17 -> 0.10**, and compute throughput
+   **63% -> 66%** in its profiling comparison. The combined result is **1.21×
    faster than the scoreboard's K8**, and within about **2% of cuBLAS latency**.
 
 The tile optimum changed with the instruction mix: the smaller tile worked
@@ -88,7 +86,7 @@ experiments.
 
 ## Fresh rerun and reproducibility
 
-The **October 1, 2026** rerun uses repeated CUDA-event measurements. The restored
+The **October 1, 2026** rerun uses repeated CUDA-event measurements.
 K10 measured **574 µs versus 541 µs** for strict FP32 cuBLAS at 2048²
 (**94.3% of cuBLAS throughput**), and **4.885 ms versus 4.200 ms** at 4096²
 (**86.0%**). It did not reproduce the historical 98% result. The current K8

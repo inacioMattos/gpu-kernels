@@ -23,7 +23,7 @@ build/matmul: matmul/matmul.cu | build
 
 benchmark: build/benchmark
 
-build/benchmark: matmul/benchmark.cu matmul/matmul.cu matmul/k10_experiment.cuh common/check.cuh | build
+build/benchmark: matmul/benchmark.cu matmul/matmul.cu common/check.cuh | build
 	$(NVCC) $(NVCCFLAGS) -lineinfo -arch=$(ARCH) $< -o $@ -lcublas
 
 check: all

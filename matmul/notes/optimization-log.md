@@ -10,7 +10,7 @@
 # SGEMM on an RTX 5070 Ti (sm_120): from naïve to cuBLAS parity
 
 A profile-driven optimization log for FP32 `C = αA·B + βC`, M = N = K = 2048, row-major.
-Each kernel is presented as **Hypothesis → Plan → Results**: why the *previous* kernel leaves
+Each kernel is presented as **Hypothesis -> Plan -> Results**: why the *previous* kernel leaves
 performance on the table, exactly what we change, and what the change actually bought (with Nsight
 Compute evidence). Part II is written so that a CUDA beginner can read it top-to-bottom and
 re-derive every kernel from scratch - the GPU concepts are explained where they first matter.
@@ -22,13 +22,13 @@ re-derive every kernel from scratch - the GPU concepts are explained where they 
 - **GPU:** RTX 5070 Ti, Blackwell consumer, sm_120, 16 GB, 70 SMs, 65536 32-bit registers/SM,
   FP32 peak ≈ 44 TFLOP/s.
 - **Workload:** 2048³ SGEMM. FLOP = 2·M·N·K = 1.72×10¹⁰. Checked against cuBLAS at rel-tol 1e-4;
-  all kernels report `max rel diff ≈ 4e-6` → genuine FP32 (cuBLAS is **not** using TF32 tensor
+  all kernels report `max rel diff ≈ 4e-6` -> genuine FP32 (cuBLAS is **not** using TF32 tensor
   cores here, which would show ~1e-3 - a fair CUDA-core-vs-CUDA-core race).
 - **Build:** `nvcc -O3 -arch=sm_120 matmul.cu -o matmul -lcublas`.
 - **Profiling:** `ncu --set full` and `--set source` on standalone `-lineinfo` harnesses
   (`profile/k6_baseline/`, `profile/k8/`).
 - **Reading the numbers:** absolute µs **drift with GPU temperature** - sustained benchmarking
-  throttles clocks (I saw the *same* binary swing 760→1100 µs). The trustworthy figure is the
+  throttles clocks (I saw the *same* binary swing 760->1100 µs). The trustworthy figure is the
   **same-run cuBLAS:k_x ratio** (both timed back-to-back in one process).
 
 ## Scoreboard
@@ -50,30 +50,30 @@ re-derive every kernel from scratch - the GPU concepts are explained where they 
 
 ---
 
-# Part I - the classic ladder (naïve → 2-D register tiling)
+# Part I - the classic ladder (naïve -> 2-D register tiling)
 
 The standard PMPP progression. Reasoning is from first principles + timings (no per-kernel ncu;
 their bottlenecks are analytically obvious).
 
 **Kernel 0 - naïve.** One thread per output; each thread streams a full row of A and column of B
 from DRAM. Every A element is re-read N times, every B element N times. Arithmetic intensity =
-2 FLOP / 8 bytes = **0.25 FLOP/byte** → pinned to DRAM bandwidth, FP32 units idle. → 5900 µs.
+2 FLOP / 8 bytes = **0.25 FLOP/byte** -> pinned to DRAM bandwidth, FP32 units idle. -> 5900 µs.
 
 **Kernel 1 - shared tiling.** Stage a 16×16 tile of A and B into `__shared__` once, reuse it 16×
-across the block → ~16× less DRAM traffic. But each thread still computes **one** output and issues
-**2 shared loads per FMA** → now shared-memory-throughput bound. → 4200 µs (~1.4×).
+across the block -> ~16× less DRAM traffic. But each thread still computes **one** output and issues
+**2 shared loads per FMA** -> now shared-memory-throughput bound. -> 4200 µs (~1.4×).
 
 **Kernel 2 - 1-D register tiling.** One thread computes a **column of TM=8 outputs**; it loads one
-B value from shared and reuses it against TM A values in registers → SMEM-load:FMA ratio drops ~TM×.
-→ 1450 µs (~2.9× over tiled).
+B value from shared and reuses it against TM A values in registers -> SMEM-load:FMA ratio drops ~TM×.
+-> 1450 µs (~2.9× over tiled).
 
 **Kernel 3 - 2-D register tiling.** One thread computes an **8×8 block**; TM A-loads + TN B-loads
-feed TM·TN FMAs, so intensity per shared load ≈ (TM·TN)/(TM+TN). → 1015 µs, ~16.9 TFLOP/s. The
+feed TM·TN FMAs, so intensity per shared load ≈ (TM·TN)/(TM+TN). -> 1015 µs, ~16.9 TFLOP/s. The
 register tile is now efficient; what's still crude is *how* the global and shared loads are issued.
 
 ---
 
-# Part II - the profiled push to cuBLAS (k6 → k11)
+# Part II - the profiled push to cuBLAS (k6 -> k11)
 
 > **This is the heart of the report.** Read the mental-model box first; every kernel below leans on it.
 
@@ -81,12 +81,12 @@ register tile is now efficient; what's still crude is *how* the global and share
 
 A GPU hides latency with *parallelism*, not speed. To reason about a GEMM kernel you need six facts:
 
-**1. The memory hierarchy (fast → slow).**
+**1. The memory hierarchy (fast -> slow).**
 - **Registers** - per-thread, ~0 latency, but a hard budget: 65536 32-bit registers per SM, shared
   by every thread resident on it.
 - **Shared memory (SMEM)** - per-block scratchpad, ~30-cycle latency, software-managed. Organized
   into **32 banks** (see fact 4).
-- **L1 / L2 cache → global memory (DRAM)** - ~200–400-cycle latency to DRAM. L2 is ~89% hit here
+- **L1 / L2 cache -> global memory (DRAM)** - ~200–400-cycle latency to DRAM. L2 is ~89% hit here
   because A/B tiles get re-read.
 - The whole game of a fast GEMM is: pull each operand from DRAM **once**, into SMEM, then into
   registers, and do as many FMAs as possible before touching SMEM/DRAM again.
@@ -112,8 +112,8 @@ width.* (This single fact decides k7 vs k8.)
 
 **5. Occupancy & the register math.** Occupancy = resident warps ÷ max warps (sm_120 max ≈ 48
 warps/SM = 1536 threads). What caps it is usually **registers**: `blocks_per_SM = floor(65536 /
-(threads_per_block × regs_per_thread))`. Example (k6): 256 threads × 90 regs = 23040 → only
-`65536/23040 = 2` blocks fit → 2×256/32 = 16 warps = 16/48 = **33%**. More occupancy *can* hide
+(threads_per_block × regs_per_thread))`. Example (k6): 256 threads × 90 regs = 23040 -> only
+`65536/23040 = 2` blocks fit -> 2×256/32 = 16 warps = 16/48 = **33%**. More occupancy *can* hide
 latency - but only if the bottleneck is latency and not a saturated pipe (k7's occupancy
 experiment shows the failure mode).
 
@@ -131,7 +131,7 @@ Two derived knobs we'll keep returning to:
 - **Arithmetic intensity** = FLOPs per byte moved (from DRAM, or from SMEM). Higher = less
   bottlenecked by memory. Register tiling and warptiling both exist to raise it.
 - **Vectorized load (`float4`)** = one instruction (`LDS.128`/`LDG.128`) moving 16 bytes (4 floats).
-  Fewer instructions for the same data → relieves the load-store pipe. Requires 16-byte alignment
+  Fewer instructions for the same data -> relieves the load-store pipe. Requires 16-byte alignment
   (the base index must be a multiple of 4 floats) and 4 contiguous elements.
 
 With that, here is each kernel.
@@ -171,7 +171,7 @@ Per K-tile, load the global tiles **with float4**:
 Then the compute loop (unchanged from kernel 3): for each `dotIdx` in `0..BK`, pull `Atmp[8]` from
 `As[dotIdx][...]` and `Btmp[8]` from `Bs[dotIdx][...]`, do 64 FMAs.
 
-The thread→output map is the thing to internalize, because it's where k6's problem hides:
+The thread->output map is the thing to internalize, because it's where k6's problem hides:
 ```cuda
 // thread t owns the 8×8 tile starting at:
 computeCol = (threadIdx.x * TM) % BN;          // column inside the BN-wide tile
@@ -193,7 +193,7 @@ depth - the launch pad for everything after.
 | Memory throughput | 63.4% | the **L1/shared** pipe is the heavier one |
 | DRAM throughput | **5.6%** | we are **not** DRAM-bandwidth-bound |
 | L2 hit rate | 89.3% | re-read A/B tiles come cheaply from L2 |
-| Registers/thread | 90 → 2 blocks/SM | occupancy is **register-limited** |
+| Registers/thread | 90 -> 2 blocks/SM | occupancy is **register-limited** |
 | Achieved occupancy | 30% (max would be 33%) | few warps to hide latency |
 | Eligible warps/scheduler | **1.49** | scheduler usually has nothing ready to issue |
 | **shared-LD bank conflicts** | **33.5 million** | the smoking gun |
@@ -211,7 +211,7 @@ lane:   0   1   2   3   4   5  …  15   16  …  31
 col:    0   8  16  24  32  40  … 120    0  … 120   (lane 16 wraps: 16·8=128, 128%128=0)
 ```
 
-The Bs row sits at word offset `dotIdx·128` (a multiple of 32 → bank 0), so the **bank** each lane
+The Bs row sits at word offset `dotIdx·128` (a multiple of 32 -> bank 0), so the **bank** each lane
 hits is `col % 32`:
 
 ```
@@ -219,19 +219,19 @@ col:   0   8  16  24  32  40  48  56  …
 bank:  0   8  16  24   0   8  16  24  …   ← only 4 distinct banks {0,8,16,24}!
 ```
 
-Lanes 0,4,8,12 all want bank 0 (but *different* words 0,32,64,96) → that's a **4-way conflict**.
-Lanes 16–31 re-read lanes 0–15's columns → free broadcasts. Net: a 4-way bank conflict on every
+Lanes 0,4,8,12 all want bank 0 (but *different* words 0,32,64,96) -> that's a **4-way conflict**.
+Lanes 16–31 re-read lanes 0–15's columns -> free broadcasts. Net: a 4-way bank conflict on every
 `Bs` read, ~5-way once averaged with the `As` reads. **That is the 33.5 M conflicts**, and it's
 why `short_scoreboard` is high: every shared load of B takes ~4× longer than it should, and 33%
 occupancy can't hide it.
 
 **Takeaway that sets up the next three kernels:** k6 is **latency-bound on the shared-memory path**,
-the dominant cause is a **structural bank conflict baked into the thread→column map** (stride 8),
+the dominant cause is a **structural bank conflict baked into the thread->column map** (stride 8),
 and DRAM is idle. So the fix must change *which banks the lanes touch*.
 
 ---
 
-## Kernel 5 (k7) - vectorize the shared loads & store ⟶ dead end #1 (and the key lesson)
+## Kernel 5 (k7) - vectorize the shared loads & store -> dead end #1 (and the key lesson)
 
 ### Hypothesis
 
@@ -252,16 +252,16 @@ reinterpret_cast<float4*>(&Btmp[4])[0] = *reinterpret_cast<float4*>(&Bs[dotIdx][
 ### Results - nothing (768 µs), and *why* is the whole point
 
 Re-profile: shared-LD bank conflicts are **still 33.7 M, unchanged**. Walk the math: a `float4`
-read at column `computeCol = (lane·8)%128` occupies words `[8·lane .. 8·lane+3]`. Lane 0 → banks
-0–3, lane 1 → banks 8–11, lane 2 → banks 16–19, lane 3 → banks 24–27, **lane 4 → banks 32–35 ≡ 0–3
-again** → collides with lane 0. The float4 made each access *wider* but the lanes still land on the
-same 4 bank-groups. **A bank conflict is a property of the thread→data *mapping*, not the load
+read at column `computeCol = (lane·8)%128` occupies words `[8·lane .. 8·lane+3]`. Lane 0 -> banks
+0–3, lane 1 -> banks 8–11, lane 2 -> banks 16–19, lane 3 -> banks 24–27, **lane 4 -> banks 32–35 ≡ 0–3
+again** -> collides with lane 0. The float4 made each access *wider* but the lanes still land on the
+same 4 bank-groups. **A bank conflict is a property of the thread->data *mapping*, not the load
 width** (fact 4). You cannot vectorize your way out of a bad mapping - you must restructure which
 lane owns which columns. That realization is what forces warptiling.
 
 ---
 
-## Interlude - the occupancy experiment ⟶ dead end #2 (rules out a tempting fix)
+## Interlude - the occupancy experiment -> dead end #2 (rules out a tempting fix)
 
 ### Hypothesis
 
@@ -271,19 +271,19 @@ warps to hide the shared/global latency. Force more warps."
 ### Plan
 
 `__launch_bounds__(256, 3)` tells `ptxas`: guarantee at least 3 blocks fit per SM. To do that it
-must keep registers ≤ `65536/(256·3) = 85`. More blocks → more warps → 50% occupancy.
+must keep registers ≤ `65536/(256·3) = 85`. More blocks -> more warps -> 50% occupancy.
 
 ### Results - *slower* (845 µs)
 
-`ptxas` hit 85 regs with **0 spills**, occupancy went 33→50% - and it got worse. Why: the
+`ptxas` hit 85 regs with **0 spills**, occupancy went 33->50% - and it got worse. Why: the
 bottleneck wasn't "too few warps", it was a **saturated shared-memory pipe** (Memory throughput
-already 63%). Adding warps just throws *more* SMEM instructions at the same congested pipe →
+already 63%). Adding warps just throws *more* SMEM instructions at the same congested pipe ->
 `mio_throttle` rises. **Occupancy is not the lever; reducing SMEM traffic per FMA is.** This is the
 hinge of the whole report: it redirects from "hide the latency" to "remove the work."
 
 ---
 
-## Kernel 6 (k8) - warptiling ⟶ the first real win (−12%)
+## Kernel 6 (k8) - warptiling -> the first real win (−12%)
 
 ### Hypothesis
 
@@ -311,7 +311,7 @@ constexpr uint WSUBM  = WM / WMITER;               // M-size of one warp sub-til
 constexpr uint WSUBN  = WN / WNITER;               // N-size of one warp sub-tile
 
 const uint lane = threadIdx.x % 32;
-const uint threadColInWarp = lane % (WSUBN / TN);  // ← consecutive lanes → adjacent columns
+const uint threadColInWarp = lane % (WSUBN / TN);  // ← consecutive lanes -> adjacent columns
 const uint threadRowInWarp = lane / (WSUBN / TN);
 
 // register caches + the per-thread accumulator
@@ -333,7 +333,7 @@ for (wSubRow…) for (wSubCol…) for (rm<TM) for (rn<TN)
     threadResults[…] += regM[wSubRow*TM+rm] * regN[wSubCol*TN+rn];
 ```
 
-### Why this is conflict-free - do the math again (config WSUBN=32, TN=4 → `WSUBN/TN = 8`)
+### Why this is conflict-free - do the math again (config WSUBN=32, TN=4 -> `WSUBN/TN = 8`)
 
 `threadColInWarp = lane % 8`. The `Bs` read for a thread starts at column
 `warpCol*WN + wSubCol*WSUBN + threadColInWarp*TN`, i.e. the bank-relevant part is
@@ -347,7 +347,7 @@ banks:          0-3 4-7 8-11 …28-31  ← all 32 banks covered, ZERO conflict
 ```
 
 Lanes 0–7 cover banks 0–31 with eight distinct `float4` groups (no conflict); lanes 8–15, 16–23,
-24–31 have the *same* `threadColInWarp` and re-read those words → free broadcasts. The stride-8
+24–31 have the *same* `threadColInWarp` and re-read those words -> free broadcasts. The stride-8
 collision of k6 is gone because lanes now advance by `TN=4` *contiguous* columns instead of `TM=8`
 *strided* ones.
 
@@ -405,7 +405,7 @@ computeRow = TM * ((threadIdx.x * TM) / BN);
 ```
 
 As shown in the k6 diagnosis, within one warp this makes `Btmp[tn] = Bs[dotIdx][computeCol+tn]`
-land the 32 lanes on only ~4 banks → the 33.5 M-conflict disaster. Everything else about k6 is fine.
+land the 32 lanes on only ~4 banks -> the 33.5 M-conflict disaster. Everything else about k6 is fine.
 So: **change only the mapping.**
 
 ### Step 1 - make the mapping warp-aware (the bank-conflict fix)
@@ -438,7 +438,7 @@ const uint laneIdx = threadIdx.x % 32;
 const uint warpsAlongN = BN / WN;                                // # of warp-tiles across N (a COUNT of warps, = 128/32 = 4 in step 1; NOT the width WN)
 const uint warpRowOffset = (warpIdx / warpsAlongN) * WM;         // delinearize warpIdx -> (row,col); this warp's top row
 const uint warpColOffset = (warpIdx % warpsAlongN) * WN;         // this warp's left col
-const uint threadColInWarp = laneIdx % WNX;     // 0..WNX-1  → adjacent lanes, adjacent columns
+const uint threadColInWarp = laneIdx % WNX;     // 0..WNX-1  -> adjacent lanes, adjacent columns
 const uint threadRowInWarp = laneIdx / WNX;     // 0..WMX-1
 computeRow = warpRowOffset + threadRowInWarp * TM;
 computeCol = warpColOffset + threadColInWarp * TN;
@@ -448,7 +448,7 @@ That is the entire change for step 1. **The concrete config used for the rest of
 (so you can check the arithmetic yourself, and so steps 1–3 differ in exactly one variable):
 
 ```
-BM = BN = 128,  BK = 8,  TM = 8,  TN = 4,  WMX = 4  (→ WNX = 32/WMX = 8),  WNITER = 1
+BM = BN = 128,  BK = 8,  TM = 8,  TN = 4,  WMX = 4  (-> WNX = 32/WMX = 8),  WNITER = 1
 ⇒ WSUBN = WNX·TN = 32,  WM = WMX·TM = 32,  WN = WNX·TN = 32  (one column-group)
 ⇒ threads/block = BM·BN/(TM·TN) = 128·128/32 = 512 ;  warps/block = 512/32 = 16 (a 4×4 warp grid)
 ⇒ each thread owns a TM×TN = 8×4 tile ;  a warp owns WM×WN = 32×32 of C
@@ -457,7 +457,7 @@ BM = BN = 128,  BK = 8,  TM = 8,  TN = 4,  WMX = 4  (→ WNX = 32/WMX = 8),  WNI
 (Step 2 will flip `WNITER` to 2 and change *nothing else*; step 3 adds `#pragma unroll`. Block tile
 `BM/BN/BK` stays fixed across all three, so the only moving parts are `WNITER` and the pragma.)
 
-**Why it's conflict-free** - do the same lane→bank table we did for k6, now with `WNX=8, TN=4`
+**Why it's conflict-free** - do the same lane->bank table we did for k6, now with `WNX=8, TN=4`
 (so a warp is 4 lanes tall × 8 lanes wide). `As` is `[BK][BM]` and `Bs` is `[BK][BN]` with `BM=BN=128`,
 both multiples of 32, so the `dotIdx·BM`/`dotIdx·BN` row offset contributes bank 0 and the bank is
 just `(column or row within the tile) % 32`:
@@ -467,14 +467,14 @@ Bs read, Btmp[tn] at column  computeCol = warpColOffset + threadColInWarp*4,  th
   lane:            0   1   2   3   4   5   6   7   | 8 …(wraps)
   col within tile: 0   4   8  12  16  20  24  28   | 0 …
   bank (=col%32):  0   4   8  12  16  20  24  28   | 0 …   ← 8 distinct banks, ZERO conflict
-  (lanes 8..31 repeat threadColInWarp 0..7 → they read the SAME word → free broadcast)
+  (lanes 8..31 repeat threadColInWarp 0..7 -> they read the SAME word -> free broadcast)
 
 As read, Atmp[tm] at row  computeRow = warpRowOffset + threadRowInWarp*8,  threadRowInWarp = lane / 8
-  threadRowInWarp: 0   1   2   3       (only 4 distinct values; 8 lanes share each → broadcast)
-  row stride 8 →   banks 0, 8, 16, 24  ← 4 distinct banks, ZERO conflict
+  threadRowInWarp: 0   1   2   3       (only 4 distinct values; 8 lanes share each -> broadcast)
+  row stride 8 ->   banks 0, 8, 16, 24  ← 4 distinct banks, ZERO conflict
 ```
 
-Contrast with k6, where `col = (lane·8)%128` gave `banks 0,8,16,24,0,8,16,24…` → lanes 0 & 4 collide.
+Contrast with k6, where `col = (lane·8)%128` gave `banks 0,8,16,24,0,8,16,24…` -> lanes 0 & 4 collide.
 The fix is purely *which lane touches which column*; not one byte of the compute or the loaders
 changes. The compute loop is still `product[TM][TN]` (k6 used `[TM][TM]`; we just allow `TN ≠ TM`).
 
@@ -485,7 +485,7 @@ are gone, yet it's *barely* faster. Why so little? Because we fixed *latency* bu
 ### Step 2 - restore arithmetic intensity with a `WNITER` loop
 
 Count the shared traffic per thread per `dotIdx` in the step-1 kernel (with `TM=8, TN=4`): it loads
-`8 Atmp + 4 Btmp = 12` floats from SMEM and does `TM·TN = 32` FMAs → **2.7 FMAs per shared load**.
+`8 Atmp + 4 Btmp = 12` floats from SMEM and does `TM·TN = 32` FMAs -> **2.7 FMAs per shared load**.
 k8 does **4.0** (it loads 16, does 64). That gap *is* the remaining slowness: too many trips to the
 shared-memory pipe per unit of math (mental-model: arithmetic intensity, now measured at the SMEM
 level).
@@ -514,7 +514,7 @@ for (dotIdx = 0; dotIdx < BK; ++dotIdx) {
 
 That's it - still k6-shaped (transposed `As`, scalar reads, a 2-D `product`, the `dotIdx` loop), with
 a single extra `w` loop. With `WNITER=2`, `TM=8`, `TN=4` a thread now does `8 + 8 = 16` loads for
-`8·8 = 64` FMAs → **4.0**, matching k8. (This is literally k8 with `WMITER` fixed at 1 - and k8's own
+`8·8 = 64` FMAs -> **4.0**, matching k8. (This is literally k8 with `WMITER` fixed at 1 - and k8's own
 best config *also* uses `WMITER=1`, so fixing it costs us nothing while keeping the M side simple.)
 
 **Why `WNITER>1` is forced, not optional.** Conflict-free needs *both* `WNX·TN ≤ 32` (for the Bs
@@ -574,16 +574,16 @@ step 3.
 
 `sgemm_8b_warptiled_k6style` is **within noise of k8** (668 vs ~655 µs) and is, line for line, k6 plus
 (1) a warp-aware mapping and (2) one extra loop. That is warptiling, demystified: it is not a new
-algorithm, it is k6 with the thread→column map fixed and the register reuse turned back up.
+algorithm, it is k6 with the thread->column map fixed and the register reuse turned back up.
 
 ---
 
-## Kernel 7 (k9) - double buffering (register prefetch) ⟶ dead end #3
+## Kernel 7 (k9) - double buffering (register prefetch) -> dead end #3
 
 ### Hypothesis
 
 After k8, **compute (63%) is now the heavier pipe**, but the SMs still stall at each K-tile boundary
-because the loop is strictly serial: `load tile → __syncthreads → compute → __syncthreads → load
+because the loop is strictly serial: `load tile -> __syncthreads -> compute -> __syncthreads -> load
 next`. The remaining `short_scoreboard` (0.79 c/inst) and `long_scoreboard` (0.54) are those load
 latencies showing through. **Double buffering** breaks the serialization: keep *two* SMEM buffers,
 and while the SM computes from buffer A, issue the global loads for the next tile into registers
@@ -595,18 +595,18 @@ iteration instead of two.
 ```cuda
 __shared__ float As[2][...], Bs[2][...];
 float4 aReg[NA], bReg[NB];                 // register staging for the next tile
-// prologue: load tile 0 → regs → As[0]/Bs[0]; __syncthreads
+// prologue: load tile 0 -> regs -> As[0]/Bs[0]; __syncthreads
 for (tile…){
   if (next) load global tile t+1 INTO aReg/bReg;   // LDG issued now, overlaps compute below
   compute from buffer `cur`;                       // …the FMAs run while the LDG is in flight
-  if (next){ store aReg/bReg → buffer cur^1; __syncthreads; cur ^= 1; }
+  if (next){ store aReg/bReg -> buffer cur^1; __syncthreads; cur ^= 1; }
 }
 ```
 
 ### Results - no net gain (654 µs at k8's config)
 
-Re-profile shows exactly why: the register staging pushed registers **96 → 126**, which dropped
-occupancy **42% → 30%** (fact 5: fewer warps fit). The overlap won back about as much as the lost
+Re-profile shows exactly why: the register staging pushed registers **96 -> 126**, which dropped
+occupancy **42% -> 30%** (fact 5: fewer warps fit). The overlap won back about as much as the lost
 occupancy cost - a wash. And there's a deeper reason: with `-O3`, **`ptxas` was already hoisting the
 global `LDG` early** (the loads have no dependency until the SMEM write), so much of the overlap
 existed implicitly. Manual double buffering mostly just bought register pressure. (At the *big*-tile
@@ -615,7 +615,7 @@ own tuned config already captured it.)
 
 ---
 
-## Kernel 8 (k10) - vectorize the warptile register loads ⟶ the polish win (≈98% of cuBLAS)
+## Kernel 8 (k10) - vectorize the warptile register loads -> the polish win (≈98% of cuBLAS)
 
 ### Hypothesis
 
@@ -623,7 +623,7 @@ Look at k8's inner loop: `regM`/`regN` are still loaded from SMEM with **scalar 
 `for i<TM` loop. k8's top true-stalls are `short_scoreboard` (0.79) and `dispatch_stall` (0.71  -
 the issue port is clogged with too many tiny load instructions). The `TM` elements a thread needs
 (`As[…+threadRowInWarp*TM + i]`, i=0..TM-1) are **contiguous in SMEM**, so each group is exactly one
-`float4 LDS.128` → **4× fewer shared-load instructions**, less MIO pressure, fewer dispatch stalls.
+`float4 LDS.128` -> **4× fewer shared-load instructions**, less MIO pressure, fewer dispatch stalls.
 
 **Why does vectorizing work here when it did nothing in k7?** Because warptiling already made the
 mapping conflict-free. In k7 we vectorized a *bad* mapping (conflicts unchanged). Here we're cutting
@@ -639,23 +639,23 @@ for (i=0; i<TM; i+=4)
       *reinterpret_cast<float4*>(&As[dotIdx*ASTRIDE + warpRow*WM + wSubRow*WSUBM + threadRowInWarp*TM + i]);
 ```
 Plus three cheap polish moves the profile pointed at:
-- `__restrict__` on A/B/C pointers + `#pragma unroll` on the K-loop and FMA nest → lets `ptxas`
+- `__restrict__` on A/B/C pointers + `#pragma unroll` on the K-loop and FMA nest -> lets `ptxas`
   schedule freely and fully unroll the 64-FMA inner product.
-- **Pad the As column stride `BM → BM+4`** (kept a multiple of 4 so `float4` stays aligned). The
+- **Pad the As column stride `BM -> BM+4`** (kept a multiple of 4 so `float4` stays aligned). The
   ncu rule engine flagged a 2.7-way conflict on the *transpose store* (`As[k][m]` writes with
-  stride BM; BM=64 is a multiple of 32 so the lanes collide). Stride 68 isn't a multiple of 32 →
+  stride BM; BM=64 is a multiple of 32 so the lanes collide). Stride 68 isn't a multiple of 32 ->
   the collision breaks. (It turned out off-critical-path, but it's the right instinct and free.)
 
 ### Results
 
-557 µs, **1.02× cuBLAS (≈98%)**. Re-profile: `dispatch_stall` **0.71 → 0.31**, `mio_throttle`
-**0.17 → 0.10**, compute **63 → 66%**. With far fewer SMEM instructions the *tile optimum shifted*
+557 µs, **1.02× cuBLAS (≈98%)**. Re-profile: `dispatch_stall` **0.71 -> 0.31**, `mio_throttle`
+**0.17 -> 0.10**, compute **63 -> 66%**. With far fewer SMEM instructions the *tile optimum shifted*
 to the big tile (BK=16) - see Part III. What's left is `short/long_scoreboard` latency the compiler
 already pipelines, against a 66%-busy FMA pipe - i.e. we're now genuinely close to the math limit.
 
 ---
 
-## Kernel 9 (k11) - double buffer + vectorized loads ⟶ confirms double-buffering is a wash
+## Kernel 9 (k11) - double buffer + vectorized loads -> confirms double-buffering is a wash
 
 ### Hypothesis
 
@@ -697,12 +697,12 @@ k10's vectorized loads changed the per-iteration instruction balance. **Lesson: 
 every structural change**; there is no globally "best" tile.
 
 Tuned optima found by sweeping:
-- **k6:** `BM64 BN256 BK32 TM8` → 765 µs (only ~2% over its default; the algorithm caps at ~1.40×
+- **k6:** `BM64 BN256 BK32 TM8` -> 765 µs (only ~2% over its default; the algorithm caps at ~1.40×
   no matter the tile - the conflicts are structural, not a tuning artifact).
-- **k8:** small tile `BM64 BN128 BK8 TM4 TN4 WM32 WN64 WNITER2` → 653–675 µs.
-- **k10/k9/k11:** big tile `BM128 BN128 BK16 TM8 TN4 WM64 WN64 WNITER4`, 128 threads → 557 µs (k10).
+- **k8:** small tile `BM64 BN128 BK8 TM4 TN4 WM32 WN64 WNITER2` -> 653–675 µs.
+- **k10/k9/k11:** big tile `BM128 BN128 BK16 TM8 TN4 WM64 WN64 WNITER4`, 128 threads -> 557 µs (k10).
 
-**What the fair comparison reveals:** tuned k6 (765) ≈ k7 (768) → **k7 contributed nothing**; the
+**What the fair comparison reveals:** tuned k6 (765) ≈ k7 (768) -> **k7 contributed nothing**; the
 real wins are **k8 (warptiling)** then **k10 (vectorized loads)**. The earlier impression that "k8
 was flat and k9 was the jump" was purely an artifact of the shared config.
 
@@ -725,7 +725,7 @@ scaling** - are all bound to **datacenter tensor-core GEMM (SM100/SM90, FP16/FP8
 transfer to FP32 **CUDA-core** SGEMM on a consumer sm_120 part. The two portable ideas: **XOR
 shared-memory swizzle** (a cleaner bank-conflict fix than padding - same effect as our As pad, off
 the critical path here) and **wider/256-bit loads + cache policies** (these target *memory-bound*
-kernels; k10 is compute-bound → neutral).
+kernels; k10 is compute-bound -> neutral).
 
 ## Why not beat cuBLAS outright
 
