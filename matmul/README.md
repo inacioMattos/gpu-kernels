@@ -86,7 +86,7 @@ experiments.
 
 ## Fresh rerun and reproducibility
 
-The **October 1, 2026** rerun uses repeated CUDA-event measurements.
+The benchmark rerun uses repeated CUDA-event measurements.
 K10 measured **574 µs versus 541 µs** for strict FP32 cuBLAS at 2048²
 (**94.3% of cuBLAS throughput**), and **4.885 ms versus 4.200 ms** at 4096²
 (**86.0%**). It did not reproduce the historical 98% result. The current K8
