@@ -45,7 +45,7 @@ re-derive every kernel from scratch - the GPU concepts are explained where they 
 | 6 | k8 warptiling | 675 µs | 1.23× | 25.5 | conflict-free shared loads |
 | 6b | k8b warptiling, k6-style | 655 µs | 1.20× | 26.3 | **same perf as k8, reads like k6** (see interlude) |
 | 7 | k9 double-buffer (reg-prefetch) | 578 µs | 1.05× | 29.8 | overlap global loads |
-| 8 | **k10 warptiling + vec SMEM loads** | **557 µs** | **1.02×** | **30.9** | **best - ≈98% of cuBLAS** |
+| 8 | **k10 warptiling + vec SMEM loads** | **557 µs** | **1.02×** | **30.9** | vectorized loads with tuned warp tiles |
 | 9 | k11 double-buffer + vec loads | 571 µs | 1.04× | 30.1 | confirm db is a wash |
 
 ---
@@ -615,7 +615,7 @@ own tuned config already captured it.)
 
 ---
 
-## Kernel 8 (k10) - vectorize the warptile register loads -> the polish win (≈98% of cuBLAS)
+## Kernel 8 (k10) - vectorize the warptile register loads
 
 ### Hypothesis
 
@@ -648,7 +648,7 @@ Plus three cheap polish moves the profile pointed at:
 
 ### Results
 
-557 µs, **1.02× cuBLAS (≈98%)**. Re-profile: `dispatch_stall` **0.71 -> 0.31**, `mio_throttle`
+557 µs, **1.02× cuBLAS latency**. Re-profile: `dispatch_stall` **0.71 -> 0.31**, `mio_throttle`
 **0.17 -> 0.10**, compute **63 -> 66%**. With far fewer SMEM instructions the *tile optimum shifted*
 to the big tile (BK=16) - see Part III. What's left is `short/long_scoreboard` latency the compiler
 already pipelines, against a 66%-busy FMA pipe - i.e. we're now genuinely close to the math limit.
@@ -732,8 +732,6 @@ kernels; k10 is compute-bound -> neutral).
 k10 sits at compute 66% / memory 61%, DRAM idle. The remaining ~2% is `short/long_scoreboard`
 latency the compiler already pipelines against a 66%-busy FMA pipe. Closing it needs hand-scheduled
 SASS (cuBLAS is hand-tuned assembly) - not reachable from CUDA C, and far past diminishing returns.
-≈98% of cuBLAS in true FP32 is effective parity for a hand-written SGEMM (cf. Boehm's ~93–96% after
-exhaustive autotuning on an A6000).
 
 ## Reproduce
 

@@ -14,8 +14,8 @@ from scratch by hand. The optimization log was written with AI.
 These are the historical measurements from my
 [optimization log](notes/optimization-log.md), on the **RTX 5070 Ti** with
 **M=N=K=2048**, FP32 inputs, and row-major matrices. The progression went from
-**5900 µs to 557 µs**: **10.59× faster than naive**, **30.9 TFLOP/s**, and about
-**98% of cuBLAS throughput** against the recorded **548 µs** baseline.
+**5900 µs to 557 µs**: **10.59× faster than naive** and **30.9 TFLOP/s**.
+The recorded cuBLAS baseline was **548 µs**.
 
 | Kernel | Time | Time / cuBLAS time | TFLOP/s | Main idea |
 |---|---:|---:|---:|---|
@@ -29,7 +29,7 @@ These are the historical measurements from my
 | K8: warp tiling | 675 µs | 1.23× | 25.5 | Change the warp's shared-memory access pattern |
 | K8b: warp tiling in K6's structure | 655 µs | 1.20× | 26.3 | Similar performance, more familiar code |
 | K9: double buffering | 578 µs | 1.05× | 29.8 | Prefetch through registers |
-| **K10: warp tiling + vectorized shared loads** | **557 µs** | **1.02×** | **30.9** | **Best recorded result: ≈98% of cuBLAS** |
+| **K10: warp tiling + vectorized shared loads** | **557 µs** | **1.02×** | **30.9** | Vectorized loads with tuned warp tiles |
 | K11: double buffering + vectorized loads | 571 µs | 1.04× | 30.1 | Added staging did not beat K10 |
 
 Times, ratios, and TFLOP/s retain the log's rounding. The ratio column measures
@@ -89,7 +89,7 @@ experiments.
 The benchmark rerun uses repeated CUDA-event measurements.
 K10 measured **574 µs versus 541 µs** for strict FP32 cuBLAS at 2048²
 (**94.3% of cuBLAS throughput**), and **4.885 ms versus 4.200 ms** at 4096²
-(**86.0%**). It did not reproduce the historical 98% result. The current K8
+(**86.0%**). The current K8
 measured **639 µs** at 2048² (**84.7%**). Full results are in
 [matmul/results/rtx-5070-ti](results/rtx-5070-ti).
 
