@@ -1,0 +1,17 @@
+{
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "cuda_toolkit": "13.3",
+  "nvcc": "13.3.73",
+  "flags": "-O3 -std=c++17 -lineinfo -arch=sm_120",
+  "rounds": 7,
+  "iterations_per_round": 20,
+  "warmups_per_round": 1,
+  "order": "naive and flash alternate first position each round",
+  "timing": "CUDA events; median of seven per-round mean latencies; allocation and transfers excluded",
+  "source_sha256": {
+    "flash-attention.cu": "0407919fc13292bd34e46b5dd4f977125864afe62f39801bb512c2e5ebbfc0ff",
+    "test.cu": "a397d2d03ca2c7205fca9d0d7a0c990a2e63c6d40d8a4835d19211b429b3e69e",
+    "benchmark.cu": "5b6e41382421f8064d8a1a95d7cfb1aeced5ccfebd7fa6692bd1a2e5a389b4d8",
+    "Makefile": "fbd50b531f8b4c81208175cddfadd48085a80c3cd09ea2df1277dd9e67ecca1a"
+  }
+}

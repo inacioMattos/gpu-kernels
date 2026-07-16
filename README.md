@@ -8,6 +8,7 @@ time goes.
 - `transpose/` - 32x32 tiles with padding
 - `softmax/` - row-wise max/sum reductions
 - [matmul/](matmul/README.md) - naive through register/warp tiling, compared against cuBLAS
+- [flash-attention-v1/](flash-attention-v1/README.md) - tiled attention with online softmax
 
 Build with nvcc. Set `ARCH` for your card.
 

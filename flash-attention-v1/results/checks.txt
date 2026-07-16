@@ -1,0 +1,68 @@
+========= COMPUTE-SANITIZER
+B=1 H=1 N=1 D=1 causal=0 pattern=0
+cpu v naive: PASS (max abs diff = 0, mismatches = 0)
+cpu v flash: PASS (max abs diff = 0, mismatches = 0)
+B=1 H=1 N=1 D=1 causal=1 pattern=0
+cpu v naive: PASS (max abs diff = 0, mismatches = 0)
+cpu v flash: PASS (max abs diff = 0, mismatches = 0)
+B=1 H=2 N=3 D=7 causal=0 pattern=0
+cpu v naive: PASS (max abs diff = 5.96046e-08, mismatches = 0)
+cpu v flash: PASS (max abs diff = 5.96046e-08, mismatches = 0)
+B=1 H=2 N=3 D=7 causal=1 pattern=0
+cpu v naive: PASS (max abs diff = 5.96046e-08, mismatches = 0)
+cpu v flash: PASS (max abs diff = 5.96046e-08, mismatches = 0)
+B=2 H=3 N=31 D=32 causal=0 pattern=0
+cpu v naive: PASS (max abs diff = 8.9407e-08, mismatches = 0)
+cpu v flash: PASS (max abs diff = 8.9407e-08, mismatches = 0)
+B=2 H=3 N=31 D=32 causal=1 pattern=0
+cpu v naive: PASS (max abs diff = 9.31323e-08, mismatches = 0)
+cpu v flash: PASS (max abs diff = 8.9407e-08, mismatches = 0)
+B=1 H=2 N=32 D=33 causal=0 pattern=0
+cpu v naive: PASS (max abs diff = 5.96046e-08, mismatches = 0)
+cpu v flash: PASS (max abs diff = 7.45058e-08, mismatches = 0)
+B=1 H=2 N=32 D=33 causal=1 pattern=0
+cpu v naive: PASS (max abs diff = 1.19209e-07, mismatches = 0)
+cpu v flash: PASS (max abs diff = 8.9407e-08, mismatches = 0)
+B=2 H=1 N=33 D=64 causal=0 pattern=0
+cpu v naive: PASS (max abs diff = 8.9407e-08, mismatches = 0)
+cpu v flash: PASS (max abs diff = 1.19209e-07, mismatches = 0)
+B=2 H=1 N=33 D=64 causal=1 pattern=0
+cpu v naive: PASS (max abs diff = 8.9407e-08, mismatches = 0)
+cpu v flash: PASS (max abs diff = 1.19209e-07, mismatches = 0)
+B=1 H=2 N=59 D=65 causal=0 pattern=0
+cpu v naive: PASS (max abs diff = 7.45058e-08, mismatches = 0)
+cpu v flash: PASS (max abs diff = 1.04308e-07, mismatches = 0)
+B=1 H=2 N=59 D=65 causal=1 pattern=0
+cpu v naive: PASS (max abs diff = 1.19209e-07, mismatches = 0)
+cpu v flash: PASS (max abs diff = 1.19209e-07, mismatches = 0)
+B=2 H=2 N=65 D=128 causal=0 pattern=0
+cpu v naive: PASS (max abs diff = 2.38419e-07, mismatches = 0)
+cpu v flash: PASS (max abs diff = 2.98023e-07, mismatches = 0)
+B=2 H=2 N=65 D=128 causal=1 pattern=0
+cpu v naive: PASS (max abs diff = 2.38419e-07, mismatches = 0)
+cpu v flash: PASS (max abs diff = 2.38419e-07, mismatches = 0)
+B=1 H=1 N=97 D=129 causal=0 pattern=0
+cpu v naive: PASS (max abs diff = 8.9407e-08, mismatches = 0)
+cpu v flash: PASS (max abs diff = 1.3411e-07, mismatches = 0)
+B=1 H=1 N=97 D=129 causal=1 pattern=0
+cpu v naive: PASS (max abs diff = 1.49012e-07, mismatches = 0)
+cpu v flash: PASS (max abs diff = 1.3411e-07, mismatches = 0)
+B=1 H=2 N=129 D=256 causal=0 pattern=0
+cpu v naive: PASS (max abs diff = 1.19209e-06, mismatches = 0)
+cpu v flash: PASS (max abs diff = 1.37091e-06, mismatches = 0)
+B=1 H=2 N=129 D=256 causal=1 pattern=0
+cpu v naive: PASS (max abs diff = 1.13249e-06, mismatches = 0)
+cpu v flash: PASS (max abs diff = 1.19209e-06, mismatches = 0)
+B=2 H=2 N=97 D=64 causal=0 pattern=1
+cpu v naive: PASS (max abs diff = 4.47035e-08, mismatches = 0)
+cpu v flash: PASS (max abs diff = 8.9407e-08, mismatches = 0)
+B=2 H=2 N=97 D=64 causal=1 pattern=1
+cpu v naive: PASS (max abs diff = 1.49012e-07, mismatches = 0)
+cpu v flash: PASS (max abs diff = 2.08616e-07, mismatches = 0)
+B=2 H=2 N=97 D=64 causal=0 pattern=2
+cpu v naive: PASS (max abs diff = 5.96046e-08, mismatches = 0)
+cpu v flash: PASS (max abs diff = 5.96046e-08, mismatches = 0)
+B=2 H=2 N=97 D=64 causal=1 pattern=2
+cpu v naive: PASS (max abs diff = 1.19209e-07, mismatches = 0)
+cpu v flash: PASS (max abs diff = 1.19209e-07, mismatches = 0)
+========= ERROR SUMMARY: 0 errors

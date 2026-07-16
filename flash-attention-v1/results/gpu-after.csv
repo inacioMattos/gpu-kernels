@@ -1,0 +1,2 @@
+name, driver_version, temperature.gpu, clocks.current.sm [MHz], power.limit [W]
+NVIDIA GeForce RTX 5070 Ti, 610.43.03, 55, 2865 MHz, 300.00 W
