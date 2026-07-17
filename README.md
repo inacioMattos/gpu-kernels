@@ -1,7 +1,9 @@
 # gpu-kernels
 
-Working through CUDA and PMPP. Mostly small experiments to understand where the
-time goes.
+CUDA experiments inspired by *Programming Massively Parallel Processors*
+(PMPP), a book about writing parallel programs for GPUs. It covers CUDA's
+execution model, GPU memory, synchronization, and techniques for making kernels
+faster. This repo is where I practice those ideas and measure the results.
 
 - `vector_add/` - grid-stride loop
 - `reduction/` - shared-memory sum, multiple passes
